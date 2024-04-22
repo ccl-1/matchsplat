@@ -112,6 +112,9 @@ class LocalFeatureTransformer(nn.Module):
         cross_layer = AG_RoPE_EncoderLayer(config['d_model'], config['nhead'], config['agg_size0'], config['agg_size1'],
                                             config['no_flash'], False, config['npe'], self.fp32)
         self.layers = nn.ModuleList([copy.deepcopy(self_layer) if _ == 'self' else copy.deepcopy(cross_layer) for _ in self.layer_names])
+        
+
+        
         self._reset_parameters()
 
     def _reset_parameters(self):
@@ -165,4 +168,5 @@ class LocalFeatureTransformer(nn.Module):
             elif mask_w1 != mask_W1:
                 feat1 = torch.cat([feat1, torch.zeros(bs, c, mask_H1, mask_W1-mask_w1, device=feat1.device, dtype=feat1.dtype)], dim=-1)
 
+        
         return feat0, feat1

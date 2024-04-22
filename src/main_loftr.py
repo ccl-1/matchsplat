@@ -124,6 +124,9 @@ def train(cfg_dict: DictConfig):
 
     encoder, encoder_visualizer = get_encoder(cfg.model.encoder,  backbone_cfg =_default_cfg)
 
+    depth_ckpt_path = "checkpoints/depth_predictor.ckpt"
+    encoder.load_state_dict(torch.load(depth_ckpt_path), strict=False) # only load weight of depth_predictor
+
     model_wrapper = ModelWrapper(
         cfg.optimizer,
         cfg.test,
@@ -142,12 +145,11 @@ def train(cfg_dict: DictConfig):
     )
 
     if cfg.mode == "train":
-        trainer.fit(model_wrapper, datamodule=data_module, ckpt_path=checkpoint_path)
+        trainer.fit(model_wrapper, datamodule=data_module)
     else:
         trainer.test(
             model_wrapper,
             datamodule=data_module,
-            ckpt_path=checkpoint_path,
         )
 
 

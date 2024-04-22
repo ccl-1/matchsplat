@@ -24,7 +24,7 @@ data_loader:
   train:
     num_workers: 10
     persistent_workers: true
-    batch_size: 1
+    batch_size: 4
     seed: 1234
   test:
     num_workers: 4
@@ -43,7 +43,7 @@ optimizer:
   cosine_lr: true
 
 checkpointing:
-  load: null
+  load: 'checkpoints/depth_predictor.ckpt'
   every_n_train_steps: 20000  # 5000
   save_top_k: -1
   pretrained_model: null

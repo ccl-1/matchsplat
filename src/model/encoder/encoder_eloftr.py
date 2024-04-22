@@ -1,15 +1,19 @@
 import torch
 from torch import Tensor, nn
 import torchvision.transforms as tf
+import torch.nn.functional as F
+
 from einops.einops import rearrange
 from jaxtyping import Float
 from collections import OrderedDict
+import matplotlib.cm as cm
 
 from dataclasses import dataclass
 from typing import Literal, Optional, List
 
 # loftr
 from .loftr.loftr import LoFTR, reparameter
+from.loftr.utils.plotting import make_matching_figure
 
 # dataset
 from ...dataset.shims.bounds_shim import apply_bounds_shim
@@ -27,6 +31,13 @@ from .costvolume.get_depth import DepthPredictorMultiView
 from .visualization.encoder_visualizer_costvolume_cfg import EncoderVisualizerCostVolumeCfg
 
 
+def save_match(context, mkpts0, mkpts1, mconf, path='./match.png'):
+            color = cm.jet(mconf)
+            text = ['LoFTR', 'Matches: {}'.format(len(mkpts0))]
+            make_matching_figure(context["image"][0,0].permute(1,2,0).detach().numpy(), 
+                                context["image"][0,1].permute(1,2,0).detach().numpy(), 
+                                mkpts0.detach().numpy(), mkpts1.detach().numpy(), color, text=text, path=path)
+            
 @dataclass
 class OpacityMappingCfg:
     initial: float
@@ -71,18 +82,20 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         super().__init__(cfg)
         self.config = backbone_cfg
         self.return_cnn_features = True
+        self.profiler = None
 
-        self.matcher = LoFTR(backbone_cfg)   
+        self.matcher = LoFTR(backbone_cfg, profiler=self.profiler)   
         ckpt_path = cfg.eloftr_weights_path
-        if get_cfg().mode == 'train':
-            if cfg.eloftr_weights_path is None:
-                print("==> Init E-loFTR backbone from scratch")
-            else:
-                print("==> Load E-loFTR backbone checkpoint: %s" % ckpt_path)
-                self.matcher.load_state_dict(torch.load(ckpt_path)['state_dict'])
-                self.matcher = reparameter(self.matcher) # no reparameterization will lead to low performance
-                # if precision == 'fp16':
-                #     encoder = self.matcher.half()
+        
+        if cfg.eloftr_weights_path is None:
+            print("==> Init E-loFTR backbone from scratch")
+        else:
+            print("==> Load E-loFTR backbone checkpoint: %s" % ckpt_path)
+            self.matcher.load_state_dict(torch.load(ckpt_path)['state_dict'], False)
+            self.matcher = reparameter(self.matcher) # no reparameterization will lead to low performance
+
+        self.upconv_1x1 = nn.Conv2d(64,  cfg.d_feature, kernel_size=1)
+        self.deconv_1x1 = nn.Conv2d(256, cfg.d_feature, kernel_size=1)
 
         # gaussians convertor
         self.gaussian_adapter = GaussianAdapter(cfg.gaussian_adapter)
@@ -105,11 +118,10 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
             wo_depth_refine=cfg.wo_depth_refine,
             wo_cost_volume=cfg.wo_cost_volume,
             wo_cost_volume_refine=cfg.wo_cost_volume_refine,
-        )
-
+        )   
     
     def data_process(self, images): 
-        """  b v c h w -> b, 1, h, w,  range [0, 1]? """
+        """  b v c h w -> b, 1, h, w,  range [0, 1] """
         assert images.shape[1] == 2   # 2 VIEWS
         img0, img1 = images[:,0], images[:,1]
 
@@ -117,6 +129,19 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         img0_gray, img_gray = to_gary(img0), to_gary(img1)  # b 1 h w      
         data = {'image0': img0_gray, 'image1': img_gray}
         return data
+
+    def get_trans_feature(self, x):
+        b, v, _, _, _ = x[0].shape
+        x = [rearrange(i, "b v c h w -> (b v) c h w", b=b, v=v) for i in x]
+        x_d1, x_d2, x_d4 = x
+
+        tf_1 = self.upconv_1x1(F.interpolate(x_d1, scale_factor=0.25, mode='bilinear', align_corners=False)) # d4
+        tf_2 = F.interpolate(x_d2, scale_factor=0.5, mode='bilinear', align_corners=False)
+        tf_3 = self.deconv_1x1(x_d4) 
+        x = [tf_1, tf_2, tf_3]
+        x = [rearrange(i, "(b v) c h w -> b v c h w", b=b, v=v) for i in x]
+        return x
+
 
     def map_pdf_to_opacity(
             self,
@@ -145,14 +170,21 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         device = context["image"].device
         b, v, _, h, w = context["image"].shape      # 224, 320
         data = self.data_process(context["image"])  # input size must be divides by 32
-
-        trans_features, cnn_features = self.matcher(data, self.return_cnn_features)  # Features are downsampled by 8 [28, 40]
+        fpn_features, cnn_features = self.matcher(data, self.return_cnn_features)  # Features are downsampled by 8
+        # torch.Size([4, 2, 64, 224, 320]), torch.Size([4, 2, 128, 112, 160]), torch.Size([4, 2, 256, 56, 80])  
+        
         mkpts0, mkpts1, mconf = data['mkpts0_f'], data['mkpts1_f'], data['mconf']
+        trans_features = self.get_trans_feature(fpn_features) #  ==> [b, 128, 56, 80 ] 
+
+        # print("input data size: ", data['image0'].size())
+        # print("output mkpts0 size: ", mkpts0.size(), mconf.size())
+        save_match(context, mkpts0, mkpts1, mconf, path='./match.png')
+        # TODO Why the batch of the mkpts0 is missing ??
+
         #  TODO : Depth need to be optimized by correspondence and BA ---------------------------------------------------------- TODO
 
-
         # Sample depths from the resulting features.
-        in_feats = trans_features
+        in_feats = trans_features[2] # which trans_features is better?
         extra_info = {}
         extra_info['images'] = rearrange(context["image"], "b v c h w -> (v b) c h w")
         extra_info["scene_names"] = scene_names
@@ -209,8 +241,6 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
 
         # Optionally apply a per-pixel opacity.
         opacity_multiplier = 1
-
-        print("Testing Gaussians out: ", Gaussians)
 
         return Gaussians(
             rearrange(

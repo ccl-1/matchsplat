@@ -39,6 +39,8 @@ class LoFTR(nn.Module):
         self.fine_preprocess = FinePreprocess(config)
         self.fine_matching = FineMatching(config)
 
+        # self.
+
     def forward(self, data,return_cnn_features=True,):
         """ 
         Update:
@@ -49,6 +51,8 @@ class LoFTR(nn.Module):
                 'mask1'(optional) : (torch.Tensor): (N, H, W)
             }
         """
+        cnn_features = None
+        b = data['image0'].size(0)
         # 1. Local Feature CNN
         data.update({
             'bs': data['image0'].size(0),
@@ -63,6 +67,8 @@ class LoFTR(nn.Module):
                 'feats_x1': ret_dict['feats_x1'],
             })
             (feat_c0, feat_c1) = feats_c.split(data['bs'])
+            cnn_features = data['feats_x2'] # bvchw
+            cnn_features = rearrange(cnn_features, '(b v) c h w -> b v c h w', b=b, v=2)
         else:  # handle different input shapes
             ret_dict0, ret_dict1 = self.backbone(data['image0']), self.backbone(data['image1'])
             feat_c0 = ret_dict0['feats_c']
@@ -73,14 +79,13 @@ class LoFTR(nn.Module):
                 'feats_x2_1': ret_dict1['feats_x2'],
                 'feats_x1_1': ret_dict1['feats_x1'],
             })
-
+            cnn_features = torch.cat([data['feats_x2_0'].unsqueeze(1), data['feats_x2_1'].unsqueeze(1)], dim=1) # bvchw
         mul = self.config['resolution'][0] // self.config['resolution'][1]
         data.update({
             'hw0_c': feat_c0.shape[2:], 'hw1_c': feat_c1.shape[2:],
             'hw0_f': [feat_c0.shape[2] * mul, feat_c0.shape[3] * mul] ,
             'hw1_f': [feat_c1.shape[2] * mul, feat_c1.shape[3] * mul]
         })
-        cnn_features = torch.cat([feat_c0.unsqueeze(1), feat_c1.unsqueeze(1)], dim=1) # bvchw
 
         # 2. coarse-level loftr module
         mask_c0 = mask_c1 = None  # mask is useful in training
@@ -88,9 +93,8 @@ class LoFTR(nn.Module):
             mask_c0, mask_c1 = data['mask0'], data['mask1']
 
         feat_c0, feat_c1 = self.loftr_coarse(feat_c0, feat_c1, mask_c0, mask_c1)
-        coarse_features = torch.cat([feat_c0.unsqueeze(1), feat_c1.unsqueeze(1)], dim=1) # bvchw
-
-
+        # coarse_features = torch.cat([feat_x2_0.unsqueeze(1), feat_x2_1.unsqueeze(1)], dim=1) # bvchw
+        
         feat_c0 = rearrange(feat_c0, 'n c h w -> n (h w) c')
         feat_c1 = rearrange(feat_c1, 'n c h w -> n (h w) c')
         
@@ -109,8 +113,9 @@ class LoFTR(nn.Module):
                         [feat_c0, feat_c1])
 
         # 4. fine-level refinement
-        feat_f0_unfold, feat_f1_unfold = self.fine_preprocess(feat_c0, feat_c1, data)
-        
+        feat_f0_unfold, feat_f1_unfold, fpn_feature = self.fine_preprocess(feat_c0, feat_c1, data)
+        fpn_feature =[rearrange(f, '(b v) c h w -> b v c h w', b=b, v=2) for f in fpn_feature]
+
         # detect NaN during mixed precision training
         if self.config['replace_nan'] and (torch.any(torch.isnan(feat_f0_unfold)) or torch.any(torch.isnan(feat_f1_unfold))):
             detect_NaN(feat_f0_unfold, feat_f1_unfold)
@@ -119,11 +124,11 @@ class LoFTR(nn.Module):
 
         # 5. match fine-level            
         self.fine_matching(feat_f0_unfold, feat_f1_unfold, data)
-
+        
         if return_cnn_features:
-            out_lists = [coarse_features, cnn_features] 
+            out_lists = [fpn_feature, cnn_features] 
         else:
-            out_lists = [coarse_features, None]
+            out_lists = [fpn_feature, None]
         return out_lists
 
 

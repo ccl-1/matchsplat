@@ -1,13 +1,13 @@
 name: eloftr
 
-d_feature: 256            # ======================================================= Number of output channels of the backbone = costvolume_unet_feat_dim
+d_feature: 128            # ======================================================= Number of output channels of the backbone = costvolume_unet_feat_dim
 num_depth_candidates: 32
 num_surfaces: 1
 
 visualizer:
   num_samples: 8
   min_resolution: 256
-  export_ply: false
+  export_ply: True
 
 gaussians_per_pixel: 1
 gaussian_adapter:
@@ -22,13 +22,13 @@ opacity_mapping:
 
 # params for multi-view depth predictor
 eloftr_weights_path: "checkpoints/eloftr_outdoor.ckpt"
-costvolume_unet_feat_dim: 256 # = d_feature
+costvolume_unet_feat_dim: 128 # = d_feature
 costvolume_unet_channel_mult: [1,1,1]
 costvolume_unet_attn_res: []
 depth_unet_feat_dim: 64
 depth_unet_attn_res: []
 depth_unet_channel_mult: [1, 1, 1]
-downscale_factor: 8 # CNN features must be restored to the original image size  =======================================================
+downscale_factor: 4 # CNN features must be restored to the original image size  =======================================================
 shim_patch_size: 4
 
 # below are ablation settings, keep them as false for default model
