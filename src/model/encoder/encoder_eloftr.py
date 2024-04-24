@@ -2,11 +2,14 @@ import torch
 from torch import Tensor, nn
 import torchvision.transforms as tf
 import torch.nn.functional as F
+from torchvision.utils import save_image
 
-from einops.einops import rearrange
+from einops.einops import rearrange, repeat
 from jaxtyping import Float
 from collections import OrderedDict
 import matplotlib.cm as cm
+from PIL import Image
+
 
 from dataclasses import dataclass
 from typing import Literal, Optional, List
@@ -29,14 +32,37 @@ from .common.gaussian_adapter import GaussianAdapter, GaussianAdapterCfg
 from .costvolume.get_depth import DepthPredictorMultiView
 
 from .visualization.encoder_visualizer_costvolume_cfg import EncoderVisualizerCostVolumeCfg
+from src.visualization.vis_depth import viz_depth_tensor
+
+
+
+def get_zoe_depth(imgs, vis= False):
+    repo = "isl-org/ZoeDepth"
+    zoe = torch.hub.load(repo, "ZoeD_N", pretrained=True).cuda()
+    b, v, c, h, w = imgs.size()
+    depths = []
+    for v_idx in range(v):
+        img = imgs[:, v_idx, :, :, :].cuda()
+        depth = zoe.infer(img)  # b 1 h w 
+
+        if vis:
+            vis_depth = viz_depth_tensor(depth[0][0].detach().cpu(), return_numpy=True)
+            Image.fromarray(vis_depth).save(f"outputs/out/zoe_depth_{v_idx}.png")
+       
+        depths.append(depth.unsqueeze(1))
+    depths = torch.cat(depths, dim=1) # b v c h w
+    depths = repeat(depths, "b v dpt h w -> b v (h w) srf dpt", b=b, v=v, srf=1,)
+    return depths
 
 
 def save_match(context, mkpts0, mkpts1, mconf, path='./match.png'):
-            color = cm.jet(mconf)
-            text = ['LoFTR', 'Matches: {}'.format(len(mkpts0))]
-            make_matching_figure(context["image"][0,0].permute(1,2,0).detach().numpy(), 
-                                context["image"][0,1].permute(1,2,0).detach().numpy(), 
-                                mkpts0.detach().numpy(), mkpts1.detach().numpy(), color, text=text, path=path)
+    # this can only be used in val/test mode
+    color = cm.jet(mconf.cpu())
+    text = ['LoFTR', 'Matches: {}'.format(len(mkpts0))]
+    img1 = context["image"][0,0].permute(1,2,0).detach().numpy()
+    img2 = context["image"][0,1].permute(1,2,0).detach().numpy()
+    mkpts0, mkpts1 = mkpts0.detach().numpy(), mkpts1.detach().numpy()                               
+    make_matching_figure(img1, img2,  mkpts0, mkpts1, color, text=text, path=path)
             
 @dataclass
 class OpacityMappingCfg:
@@ -85,8 +111,7 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         self.profiler = None
 
         self.matcher = LoFTR(backbone_cfg, profiler=self.profiler)   
-        ckpt_path = cfg.eloftr_weights_path
-        
+        ckpt_path = cfg.eloftr_weights_path        
         if cfg.eloftr_weights_path is None:
             print("==> Init E-loFTR backbone from scratch")
         else:
@@ -178,7 +203,7 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
 
         # print("input data size: ", data['image0'].size())
         # print("output mkpts0 size: ", mkpts0.size(), mconf.size())
-        save_match(context, mkpts0, mkpts1, mconf, path='./match.png')
+        # save_match(context, mkpts0, mkpts1, mconf, path='./match.png')
         # TODO Why the batch of the mkpts0 is missing ??
 
         #  TODO : Depth need to be optimized by correspondence and BA ---------------------------------------------------------- TODO
@@ -201,6 +226,9 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
             extra_info=extra_info,
             cnn_features=cnn_features,
         )
+
+        # train mode this should be on gpu, on test mode in cpu
+        depths = get_zoe_depth(context["image"], vis=False).to(densities.device) # b v 1 h w
 
         # Convert the features and depths into Gaussians.
         xy_ray, _ = sample_image_grid((h, w), device)

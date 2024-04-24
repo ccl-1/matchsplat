@@ -4,6 +4,9 @@ from omegaconf import DictConfig, OmegaConf
 from copy import deepcopy
 import torch
 from PIL import Image
+from einops import einsum, rearrange, repeat
+from scipy.spatial.transform import Rotation as R
+
 
 # Configure beartype and jaxtyping.
 with install_import_hook(
@@ -24,6 +27,8 @@ with install_import_hook(
     from src.model.encoder.encoder_eloftr import EncoderELoFTR, reparameter
     from src.model.decoder import get_decoder
     from src.visualization.vis_depth import viz_depth_tensor
+    from src.geometry.projection import homogenize_points, project
+
 
 
 
@@ -39,6 +44,9 @@ if precision == 'mp':
     _default_cfg['mp'] = True
 elif precision == 'fp16':
     _default_cfg['half'] = True
+
+
+
 
 def modify_ckpt(encoder, checkpoint_path):
     ckpt_new = {}
@@ -83,7 +91,7 @@ def run(cfg_dict: DictConfig):
     # torch.save(encoder.state_dict(), new_ckpt_path)
 
     visualization_dump = {}
-    Gaussians = encoder(batch["context"], 0, False, visualization_dump=visualization_dump, scene_names=batch["scene"])
+    gaussians = encoder(batch["context"], 0, False, visualization_dump=visualization_dump, scene_names=batch["scene"])
     decoder = get_decoder(cfg.model.decoder, cfg.dataset)
     print(visualization_dump.keys())
 
@@ -91,18 +99,26 @@ def run(cfg_dict: DictConfig):
     save_image(batch["context"]["image"][0, 0], f"outputs/out/input_0.png")
     save_image(batch["context"]["image"][0, 1], f"outputs/out/input_1.png")
 
-     # save encoder depth map
-    depth_vis = (
-        (visualization_dump["depth"].squeeze(-1).squeeze(-1)).cpu().detach()
-    )
+    # save encoder depth map
+    depth_vis = ((visualization_dump["depth"].squeeze(-1).squeeze(-1)).cpu().detach())
     for v_idx in range(depth_vis.shape[1]):
         vis_depth = viz_depth_tensor(1.0 / depth_vis[0, v_idx], return_numpy=True)  # inverse depth
         Image.fromarray(vis_depth).save(f"outputs/out/depth_{v_idx}.png")
     
-    # render depth ...
+
+    # TODO  decode bugs  ..... 
+""" 
+    # Render depth.
+    *_, h, w = batch["context"]["image"].shape
+    rendered = decoder.forward( gaussians,
+        batch["context"]["extrinsics"], batch["context"]["intrinsics"],
+        batch["context"]["near"],batch["context"]["far"], (h, w), "depth",)
     
-
-
-
+    result = rendered.depth.cpu().detach()
+    print(rendered)
+    for v_idx in range(result.shape[1]):
+        vis_depth = viz_depth_tensor(1.0 / result[0, v_idx], return_numpy=True)  # inverse depth
+        Image.fromarray(vis_depth).save(f"/outputs/out/depth_{v_idx}_gs.png")
+"""
 run()
 

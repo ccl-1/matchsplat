@@ -12,8 +12,8 @@ wandb:
   mode: disabled
   id: null
 
-# mode: train
-mode: test
+mode: train
+# mode: test
 
 
 dataset:
@@ -24,7 +24,7 @@ data_loader:
   train:
     num_workers: 10
     persistent_workers: true
-    batch_size: 4
+    batch_size: 1
     seed: 1234
   test:
     num_workers: 4
