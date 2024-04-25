@@ -68,13 +68,16 @@ def run(cfg_dict: DictConfig):
     cfg = load_typed_root_config(cfg_dict)
     set_cfg(cfg_dict)
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     # load data
-    data_module = DataModule(cfg.dataset, cfg.data_loader, StepTracker())
+    data_module = DataModule(cfg.dataset, cfg.data_loader, StepTracker(), global_rank=0)
     dataset = iter(data_module.train_dataloader())
     batch = next(dataset, 0)
-
+    
     # load model
     encoder = EncoderELoFTR(cfg=cfg.model.encoder, backbone_cfg =_default_cfg )
+    encoder = encoder.to(device)
     encoder = encoder.eval()
     data_shim = get_data_shim(encoder)
     batch = data_shim(batch)
@@ -93,6 +96,7 @@ def run(cfg_dict: DictConfig):
     visualization_dump = {}
     gaussians = encoder(batch["context"], 0, False, visualization_dump=visualization_dump, scene_names=batch["scene"])
     decoder = get_decoder(cfg.model.decoder, cfg.dataset)
+    decoder = decoder.to(device)
     print(visualization_dump.keys())
 
     # save context views
@@ -105,9 +109,6 @@ def run(cfg_dict: DictConfig):
         vis_depth = viz_depth_tensor(1.0 / depth_vis[0, v_idx], return_numpy=True)  # inverse depth
         Image.fromarray(vis_depth).save(f"outputs/out/depth_{v_idx}.png")
     
-
-    # TODO  decode bugs  ..... 
-""" 
     # Render depth.
     *_, h, w = batch["context"]["image"].shape
     rendered = decoder.forward( gaussians,
@@ -115,10 +116,9 @@ def run(cfg_dict: DictConfig):
         batch["context"]["near"],batch["context"]["far"], (h, w), "depth",)
     
     result = rendered.depth.cpu().detach()
-    print(rendered)
     for v_idx in range(result.shape[1]):
         vis_depth = viz_depth_tensor(1.0 / result[0, v_idx], return_numpy=True)  # inverse depth
-        Image.fromarray(vis_depth).save(f"/outputs/out/depth_{v_idx}_gs.png")
-"""
+        Image.fromarray(vis_depth).save(f"./outputs/out/depth_{v_idx}_gs.png")
+
 run()
 

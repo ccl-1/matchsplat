@@ -176,7 +176,7 @@ class CoarseMatching(nn.Module):
 
         # 4. Random sampling of training samples for fine-level LoFTR
         # (optional) pad samples with gt coarse-level matches
-        
+        """ 
         if self.training:
             # NOTE:
             # The sampling is performed across all pairs in a batch without manually balancing
@@ -215,7 +215,9 @@ class CoarseMatching(nn.Module):
                                        dim=0),
                 *zip([b_ids, data['spv_b_ids']], [i_ids, data['spv_i_ids']],
                      [j_ids, data['spv_j_ids']], [mconf, mconf_gt]))
+        """
 
+        
         # These matches select patches that feed into fine-level network
         coarse_matches = {'b_ids': b_ids, 'i_ids': i_ids, 'j_ids': j_ids}
 

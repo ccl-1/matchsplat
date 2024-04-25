@@ -174,3 +174,6 @@ if __name__ == "__main__":
     print(_default_cfg)
     
     train()
+
+
+# python -m src.main_loftr checkpointing.load=./outputs/latest-run/checkpoints/epoch_51-step_1998.ckpt mode=test 

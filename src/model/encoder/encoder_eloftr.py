@@ -35,10 +35,10 @@ from .visualization.encoder_visualizer_costvolume_cfg import EncoderVisualizerCo
 from src.visualization.vis_depth import viz_depth_tensor
 
 
-
-def get_zoe_depth(imgs, vis= False):
-    repo = "isl-org/ZoeDepth"
-    zoe = torch.hub.load(repo, "ZoeD_N", pretrained=True).cuda()
+# model load once no all the time 。。 
+def get_zoe_depth(zoe, imgs, vis= False):
+    # repo = "isl-org/ZoeDepth"
+    # zoe = torch.hub.load(repo, "ZoeD_N", pretrained=True).cuda()
     b, v, c, h, w = imgs.size()
     depths = []
     for v_idx in range(v):
@@ -110,6 +110,10 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         self.return_cnn_features = True
         self.profiler = None
 
+        print("==> Load ZoeDepth model ")
+        repo = "isl-org/ZoeDepth"
+        self.zoe = torch.hub.load(repo, "ZoeD_N", pretrained=True).cuda()
+        
         self.matcher = LoFTR(backbone_cfg, profiler=self.profiler)   
         ckpt_path = cfg.eloftr_weights_path        
         if cfg.eloftr_weights_path is None:
@@ -143,7 +147,7 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
             wo_depth_refine=cfg.wo_depth_refine,
             wo_cost_volume=cfg.wo_cost_volume,
             wo_cost_volume_refine=cfg.wo_cost_volume_refine,
-        )   
+        )  
     
     def data_process(self, images): 
         """  b v c h w -> b, 1, h, w,  range [0, 1] """
@@ -192,8 +196,12 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         visualization_dump: Optional[dict] = None,
         scene_names: Optional[list] = None,
     ) -> Gaussians:
-        device = context["image"].device
         b, v, _, h, w = context["image"].shape      # 224, 320
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        for k in context:
+            if context[k].device != device:
+                context[k] = context[k].to(device)
+
         data = self.data_process(context["image"])  # input size must be divides by 32
         fpn_features, cnn_features = self.matcher(data, self.return_cnn_features)  # Features are downsampled by 8
         # torch.Size([4, 2, 64, 224, 320]), torch.Size([4, 2, 128, 112, 160]), torch.Size([4, 2, 256, 56, 80])  
@@ -228,7 +236,7 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         )
 
         # train mode this should be on gpu, on test mode in cpu
-        depths = get_zoe_depth(context["image"], vis=False).to(densities.device) # b v 1 h w
+        depths = get_zoe_depth(self.zoe, context["image"], vis=False).to(densities.device) # b v 1 h w
 
         # Convert the features and depths into Gaussians.
         xy_ray, _ = sample_image_grid((h, w), device)

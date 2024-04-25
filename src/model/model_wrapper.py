@@ -112,6 +112,9 @@ class ModelWrapper(LightningModule):
         self.data_shim = get_data_shim(self.encoder)
         self.losses = nn.ModuleList(losses)
 
+        for p in self.encoder.matcher.parameters():
+            p.requires_grad = False
+
         # This is used for testing.
         self.benchmarker = Benchmarker()
         self.eval_cnt = 0
