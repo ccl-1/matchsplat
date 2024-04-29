@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Protocol, runtime_checkable
+import torch.nn.functional as F
 
 import moviepy.editor as mpy
 import torch
@@ -77,6 +78,7 @@ class TrajectoryFn(Protocol):
         pass
 
 
+
 class ModelWrapper(LightningModule):
     logger: Optional[WandbLogger]
     encoder: nn.Module
@@ -124,61 +126,127 @@ class ModelWrapper(LightningModule):
             self.time_skip_steps_dict = {"encoder": 0, "decoder": 0}
 
 
+    #  issue:  validation_step  render_video_generic now only use p4 result to test ...
     def training_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)
-        _, _, _, h, w = batch["target"]["image"].shape
+        b, v, _, h, w = batch["target"]["image"].shape # 1, 4, 3, 224, 320
 
         # Run the model.
         gaussians = self.encoder(
             batch["context"], self.global_step, False, scene_names=batch["scene"]
         )
-        output = self.decoder.forward(
-            gaussians,
-            batch["target"]["extrinsics"],
-            batch["target"]["intrinsics"],
-            batch["target"]["near"],
-            batch["target"]["far"],
-            (h, w),
-            depth_mode=self.train_cfg.depth_mode,
-        )
-        target_gt = batch["target"]["image"]
+        if isinstance(gaussians, list):
+            # downscale_factor = [2, 4, 8]  
+            downscale_factor = [1, 2, 4]  
 
-        # Compute metrics.
-        psnr_probabilistic = compute_psnr(
-            rearrange(target_gt, "b v c h w -> (b v) c h w"),
-            rearrange(output.color, "b v c h w -> (b v) c h w"),
-        )
-        self.log("train/psnr_probabilistic", psnr_probabilistic.mean())
+            assert len(gaussians) == len(downscale_factor)
+            
+            total_loss = 0
+            psnr_probabilistics = []
+            target_gt_full = batch["target"]["image"].clone().detach() 
+            for gaussian, downscale in zip(gaussians, downscale_factor):
+                h_, w_ = int(h / downscale), int(w / downscale)                
+                output = self.decoder.forward(
+                    gaussian,
+                    batch["target"]["extrinsics"],
+                    batch["target"]["intrinsics"],
+                    batch["target"]["near"],
+                    batch["target"]["far"],
+                    (h_, w_),
+                    depth_mode=self.train_cfg.depth_mode,
+                )
 
-        # Compute and log loss.
-        total_loss = 0
-        for loss_fn in self.losses:
-            loss = loss_fn.forward(output, batch, gaussians, self.global_step)
-            self.log(f"loss/{loss_fn.name}", loss)
-            total_loss = total_loss + loss
-        self.log("loss/total", total_loss)
+                target_gt = rearrange(target_gt_full, "b v c h w -> (b v) c h w", b=b, v=v)
+                target_gt = F.interpolate(target_gt, scale_factor=1.0 /downscale, mode='bilinear', align_corners=False)
+                target_gt = rearrange(target_gt, "(b v) c h w -> b v c h w", b=b, v=v)
+                batch["target"]["image"] = target_gt
 
-        if (
-            self.global_rank == 0
-            and self.global_step % self.train_cfg.print_log_every_n_steps == 0
-        ):
-            print(
-                f"train step {self.global_step}; "
-                f"scene = {[x[:20] for x in batch['scene']]}; "
-                f"context = {batch['context']['index'].tolist()}; "
-                f"bound = [{batch['context']['near'].detach().cpu().numpy().mean()} "
-                f"{batch['context']['far'].detach().cpu().numpy().mean()}]; "
-                f"loss = {total_loss:.6f}"
+                # Compute metrics.
+                psnr_probabilistic = compute_psnr(
+                    rearrange(target_gt, "b v c h w -> (b v) c h w"),
+                    rearrange(output.color, "b v c h w -> (b v) c h w"),
+                )
+                psnr_probabilistics.append(psnr_probabilistic.mean())
+
+                # Compute and log loss.
+                layer_loss = 0
+                for loss_fn in self.losses:
+                    loss = loss_fn.forward(output, batch, gaussian, self.global_step)
+                    self.log(f"loss/{loss_fn.name}", loss)
+                    layer_loss = layer_loss + loss
+                total_loss += layer_loss
+
+            self.log("train/psnr_probabilistic", sum(psnr_probabilistics) / len(psnr_probabilistics))
+            self.log("loss/total", total_loss)
+            
+            if (
+                self.global_rank == 0
+                and self.global_step % self.train_cfg.print_log_every_n_steps == 0
+            ):
+                print(
+                    f"train step {self.global_step}; "
+                    f"scene = {[x[:20] for x in batch['scene']]}; "
+                    f"context = {batch['context']['index'].tolist()}; "
+                    f"bound = [{batch['context']['near'].detach().cpu().numpy().mean()} "
+                    f"{batch['context']['far'].detach().cpu().numpy().mean()}]; "
+                    f"loss = {total_loss:.6f}"
+                )
+            self.log("info/near", batch["context"]["near"].detach().cpu().numpy().mean())
+            self.log("info/far", batch["context"]["far"].detach().cpu().numpy().mean())
+            self.log("info/global_step", self.global_step)  # hack for ckpt monitor
+
+            # Tell the data loader processes about the current step.
+            if self.step_tracker is not None:
+                self.step_tracker.set_step(self.global_step)
+            return total_loss
+        else:
+            output = self.decoder.forward(
+                gaussians,
+                batch["target"]["extrinsics"],
+                batch["target"]["intrinsics"],
+                batch["target"]["near"],
+                batch["target"]["far"],
+                (h, w),
+                depth_mode=self.train_cfg.depth_mode,
             )
-        self.log("info/near", batch["context"]["near"].detach().cpu().numpy().mean())
-        self.log("info/far", batch["context"]["far"].detach().cpu().numpy().mean())
-        self.log("info/global_step", self.global_step)  # hack for ckpt monitor
+            target_gt = batch["target"]["image"]
 
-        # Tell the data loader processes about the current step.
-        if self.step_tracker is not None:
-            self.step_tracker.set_step(self.global_step)
+            # Compute metrics.
+            psnr_probabilistic = compute_psnr(
+                rearrange(target_gt, "b v c h w -> (b v) c h w"),
+                rearrange(output.color, "b v c h w -> (b v) c h w"),
+            )
+            self.log("train/psnr_probabilistic", psnr_probabilistic.mean())
 
-        return total_loss
+            # Compute and log loss.
+            total_loss = 0
+            for loss_fn in self.losses:
+                loss = loss_fn.forward(output, batch, gaussians, self.global_step)
+                self.log(f"loss/{loss_fn.name}", loss)
+                total_loss = total_loss + loss
+            self.log("loss/total", total_loss)
+
+            if (
+                self.global_rank == 0
+                and self.global_step % self.train_cfg.print_log_every_n_steps == 0
+            ):
+                print(
+                    f"train step {self.global_step}; "
+                    f"scene = {[x[:20] for x in batch['scene']]}; "
+                    f"context = {batch['context']['index'].tolist()}; "
+                    f"bound = [{batch['context']['near'].detach().cpu().numpy().mean()} "
+                    f"{batch['context']['far'].detach().cpu().numpy().mean()}]; "
+                    f"loss = {total_loss:.6f}"
+                )
+            self.log("info/near", batch["context"]["near"].detach().cpu().numpy().mean())
+            self.log("info/far", batch["context"]["far"].detach().cpu().numpy().mean())
+            self.log("info/global_step", self.global_step)  # hack for ckpt monitor
+
+            # Tell the data loader processes about the current step.
+            if self.step_tracker is not None:
+                self.step_tracker.set_step(self.global_step)
+            return total_loss
+
 
     def test_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)
@@ -299,6 +367,9 @@ class ModelWrapper(LightningModule):
             self.global_step,
             deterministic=False,
         )
+        # to ensure normally run the model, just use the d4 result for now
+        if isinstance(gaussians_softmax, list):
+            gaussians_softmax = gaussians_softmax[1]
         output_softmax = self.decoder.forward(
             gaussians_softmax,
             batch["target"]["extrinsics"],
@@ -474,6 +545,8 @@ class ModelWrapper(LightningModule):
     ) -> None:
         # Render probabilistic estimate of scene.
         gaussians_prob = self.encoder(batch["context"], self.global_step, False)
+        if isinstance(gaussians_prob, list):
+            gaussians_prob = gaussians_prob[1]
         # gaussians_det = self.encoder(batch["context"], self.global_step, True)
 
         t = torch.linspace(0, 1, num_frames, dtype=torch.float32, device=self.device)

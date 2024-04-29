@@ -97,6 +97,8 @@ class EncoderELoFTRCfg:
     wo_cost_volume: bool
     wo_backbone_cross_attn: bool
     wo_cost_volume_refine: bool
+    wo_fpn_depth: bool
+
 
 
 class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
@@ -110,9 +112,9 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         self.return_cnn_features = True
         self.profiler = None
 
-        print("==> Load ZoeDepth model ")
-        repo = "isl-org/ZoeDepth"
-        self.zoe = torch.hub.load(repo, "ZoeD_N", pretrained=True).cuda()
+        # print("==> Load ZoeDepth model ")
+        # repo = "isl-org/ZoeDepth"
+        # self.zoe = torch.hub.load(repo, "ZoeD_N", pretrained=True).cuda()
         
         self.matcher = LoFTR(backbone_cfg, profiler=self.profiler)   
         ckpt_path = cfg.eloftr_weights_path        
@@ -122,33 +124,63 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
             print("==> Load E-loFTR backbone checkpoint: %s" % ckpt_path)
             self.matcher.load_state_dict(torch.load(ckpt_path)['state_dict'], False)
             self.matcher = reparameter(self.matcher) # no reparameterization will lead to low performance
-
-        self.upconv_1x1 = nn.Conv2d(64,  cfg.d_feature, kernel_size=1)
-        self.deconv_1x1 = nn.Conv2d(256, cfg.d_feature, kernel_size=1)
+            
+        self.conv1x1_128_64 =  nn.Sequential(nn.Conv2d(128, 64, 1), nn.Conv2d(64, 64, 1))
+        self.conv1x1_256_128 = nn.Sequential(nn.Conv2d(256, 128, 1), nn.Conv2d(128, 128,1))
+        self.conv_64 = nn.Sequential(nn.Conv2d(64, 64, 1), nn.Conv2d(64, 64, 1))
+        self.conv_128 = nn.Sequential(nn.Conv2d(128, 128, 1), nn.Conv2d(128, 128, 1))
+        self.conv_128_d8_trans = nn.Conv2d(128, 128, 1)
+        self.conv_128_d8_cnn = nn.Conv2d(128, 128, 1)
 
         # gaussians convertor
         self.gaussian_adapter = GaussianAdapter(cfg.gaussian_adapter)
 
-        # TODO BA based depth predictor
-        self.depth_predictor = DepthPredictorMultiView(
-            feature_channels=cfg.d_feature,
-            upscale_factor=cfg.downscale_factor,
-            num_depth_candidates=cfg.num_depth_candidates,
-            costvolume_unet_feat_dim=cfg.costvolume_unet_feat_dim, # input channels
+        self.use_d8_depth = True
+        if cfg.wo_fpn_depth:
+            self.depth_predictor = DepthPredictorMultiView(
+                feature_channels=cfg.d_feature,
+                upscale_factor=cfg.downscale_factor,
+                num_depth_candidates=cfg.num_depth_candidates,
+                costvolume_unet_feat_dim=cfg.costvolume_unet_feat_dim, # input channels
+                costvolume_unet_channel_mult=tuple(cfg.costvolume_unet_channel_mult),
+                costvolume_unet_attn_res=tuple(cfg.costvolume_unet_attn_res),
+                gaussian_raw_channels=cfg.num_surfaces * (self.gaussian_adapter.d_in + 2),
+                gaussians_per_pixel=cfg.gaussians_per_pixel,
+                num_views=get_cfg().dataset.view_sampler.num_context_views,
+                depth_unet_feat_dim=cfg.depth_unet_feat_dim,
+                depth_unet_attn_res=cfg.depth_unet_attn_res,
+                depth_unet_channel_mult=cfg.depth_unet_channel_mult,
+                wo_depth_refine=cfg.wo_depth_refine,
+                wo_cost_volume=cfg.wo_cost_volume,
+                wo_cost_volume_refine=cfg.wo_cost_volume_refine,
+            )  
+        else:
+            if self.use_d8_depth:
+                self.d_feature = [64, 128, 128]
+                self.downscale_factor = [2, 4, 8]  
+            else:
+                self.d_feature = [64, 128]
+                self.downscale_factor = [2, 4]   
+            self.fpn_depth_predictor = nn.ModuleList([
+                DepthPredictorMultiView(
+                    feature_channels=df,
+                    upscale_factor=ds,
+                    num_depth_candidates=cfg.num_depth_candidates,
+                    costvolume_unet_feat_dim=df, 
+                    costvolume_unet_channel_mult=tuple(cfg.costvolume_unet_channel_mult),
+                    costvolume_unet_attn_res=tuple(cfg.costvolume_unet_attn_res),
+                    gaussian_raw_channels=cfg.num_surfaces * (self.gaussian_adapter.d_in + 2),
+                    gaussians_per_pixel=cfg.gaussians_per_pixel,
+                    num_views=get_cfg().dataset.view_sampler.num_context_views,
+                    depth_unet_feat_dim=cfg.depth_unet_feat_dim,
+                    depth_unet_attn_res=cfg.depth_unet_attn_res,
+                    depth_unet_channel_mult=cfg.depth_unet_channel_mult,
+                    wo_depth_refine=cfg.wo_depth_refine,
+                    wo_cost_volume=cfg.wo_cost_volume,
+                    wo_cost_volume_refine=cfg.wo_cost_volume_refine,)  
+                for df, ds in zip(self.d_feature, self.downscale_factor)
+            ])
 
-            costvolume_unet_channel_mult=tuple(cfg.costvolume_unet_channel_mult),
-            costvolume_unet_attn_res=tuple(cfg.costvolume_unet_attn_res),
-            gaussian_raw_channels=cfg.num_surfaces * (self.gaussian_adapter.d_in + 2),
-            gaussians_per_pixel=cfg.gaussians_per_pixel,
-            num_views=get_cfg().dataset.view_sampler.num_context_views,
-            depth_unet_feat_dim=cfg.depth_unet_feat_dim,
-            depth_unet_attn_res=cfg.depth_unet_attn_res,
-            depth_unet_channel_mult=cfg.depth_unet_channel_mult,
-            wo_depth_refine=cfg.wo_depth_refine,
-            wo_cost_volume=cfg.wo_cost_volume,
-            wo_cost_volume_refine=cfg.wo_cost_volume_refine,
-        )  
-    
     def data_process(self, images): 
         """  b v c h w -> b, 1, h, w,  range [0, 1] """
         assert images.shape[1] == 2   # 2 VIEWS
@@ -162,15 +194,44 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
     def get_trans_feature(self, x):
         b, v, _, _, _ = x[0].shape
         x = [rearrange(i, "b v c h w -> (b v) c h w", b=b, v=v) for i in x]
-        x_d1, x_d2, x_d4 = x
-
-        tf_1 = self.upconv_1x1(F.interpolate(x_d1, scale_factor=0.25, mode='bilinear', align_corners=False)) # d4
-        tf_2 = F.interpolate(x_d2, scale_factor=0.5, mode='bilinear', align_corners=False)
-        tf_3 = self.deconv_1x1(x_d4) 
-        x = [tf_1, tf_2, tf_3]
+        x_d2, x_d4 = x
+        x2 = self.conv1x1_128_64(x_d2) 
+        x4 = self.conv1x1_256_128(x_d4) 
+        x = [x2, x4]
         x = [rearrange(i, "(b v) c h w -> b v c h w", b=b, v=v) for i in x]
         return x
+    
+    def get_cnn_feature(self, x):
+        if isinstance(x, list):
+            b, v, _, _, _ = x[0].shape
+            x = [rearrange(i, "b v c h w -> (b v) c h w", b=b, v=v) for i in x]
+            x_d2, x_d4 = x # orch.Size([2, 64, 112, 160]) [2, 128, 56, 80])
+            x2 = self.conv_64(x_d2) 
+            x4 = self.conv_128(x_d4) 
+            x = [x2, x4]
+            x = [rearrange(i, "(b v) c h w -> b v c h w", b=b, v=v) for i in x]
+        else:
+            b, v, _, _, _ = x.shape
+            x = rearrange(x, "b v c h w -> (b v) c h w", b=b, v=v) 
+            x = self.conv_128(x) 
+            x = rearrange(x, "(b v) c h w -> b v c h w", b=b, v=v) 
+        return x
 
+    def add_d8_feature(self, trans_features, cnn_features):
+        b, v, _, _, _ = trans_features[1].shape  
+        d8_trans = rearrange(trans_features[1], "b v c h w -> (b v) c h w", b=b, v=v)
+        d8_trans = F.interpolate(d8_trans, scale_factor=0.5, mode='bilinear', align_corners=False)
+        d8_trans = self.conv_128_d8_trans(d8_trans)
+        d8_trans = rearrange(d8_trans, "(b v) c h w -> b v c h w", b=b, v=v)
+
+        d8_cnn = rearrange(cnn_features[1], "b v c h w -> (b v) c h w", b=b, v=v)
+        d8_cnn = F.interpolate(d8_cnn, scale_factor=0.5, mode='bilinear', align_corners=False)
+        d8_cnn = self.conv_128_d8_cnn(d8_cnn)
+        d8_cnn = rearrange(d8_cnn, "(b v) c h w -> b v c h w", b=b, v=v)
+        
+        trans_features.append(d8_trans)
+        cnn_features.append(d8_cnn)
+        return trans_features, cnn_features
 
     def map_pdf_to_opacity(
             self,
@@ -187,57 +248,10 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
             # Map the probability density to an opacity.
             return 0.5 * (1 - (1 - pdf) ** exponent + pdf ** (1 / exponent))
 
-
-    def forward(
-        self,
-        context: dict,
-        global_step: int,
-        deterministic: bool = False,
-        visualization_dump: Optional[dict] = None,
-        scene_names: Optional[list] = None,
-    ) -> Gaussians:
-        b, v, _, h, w = context["image"].shape      # 224, 320
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        for k in context:
-            if context[k].device != device:
-                context[k] = context[k].to(device)
-
-        data = self.data_process(context["image"])  # input size must be divides by 32
-        fpn_features, cnn_features = self.matcher(data, self.return_cnn_features)  # Features are downsampled by 8
-        # torch.Size([4, 2, 64, 224, 320]), torch.Size([4, 2, 128, 112, 160]), torch.Size([4, 2, 256, 56, 80])  
-        
-        mkpts0, mkpts1, mconf = data['mkpts0_f'], data['mkpts1_f'], data['mconf']
-        trans_features = self.get_trans_feature(fpn_features) #  ==> [b, 128, 56, 80 ] 
-
-        # print("input data size: ", data['image0'].size())
-        # print("output mkpts0 size: ", mkpts0.size(), mconf.size())
-        # save_match(context, mkpts0, mkpts1, mconf, path='./match.png')
-        # TODO Why the batch of the mkpts0 is missing ??
-
-        #  TODO : Depth need to be optimized by correspondence and BA ---------------------------------------------------------- TODO
-
-        # Sample depths from the resulting features.
-        in_feats = trans_features[2] # which trans_features is better?
-        extra_info = {}
-        extra_info['images'] = rearrange(context["image"], "b v c h w -> (v b) c h w")
-        extra_info["scene_names"] = scene_names
-        gpp = self.cfg.gaussians_per_pixel
-
-        depths, densities, raw_gaussians = self.depth_predictor(
-            in_feats,
-            context["intrinsics"],
-            context["extrinsics"],
-            context["near"],
-            context["far"],
-            gaussians_per_pixel=gpp,
-            deterministic=deterministic,
-            extra_info=extra_info,
-            cnn_features=cnn_features,
-        )
-
-        # train mode this should be on gpu, on test mode in cpu
-        depths = get_zoe_depth(self.zoe, context["image"], vis=False).to(densities.device) # b v 1 h w
-
+    def convert_fd_to_gaussians(self, h,w, context, depths, 
+                raw_gaussians, densities,
+                global_step, device
+                ):
         # Convert the features and depths into Gaussians.
         xy_ray, _ = sample_image_grid((h, w), device)
         xy_ray = rearrange(xy_ray, "h w xy -> (h w) () xy")
@@ -256,47 +270,157 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
             rearrange(xy_ray, "b v r srf xy -> b v r srf () xy"),
             depths,
             self.map_pdf_to_opacity(densities, global_step) / gpp,
-            rearrange(
-                gaussians[..., 2:],
-                "b v r srf c -> b v r srf () c",
-            ),
-            (h, w),
-        )
+            rearrange(gaussians[..., 2:],
+                "b v r srf c -> b v r srf () c",),(h, w),)
+        return gaussians
 
-        # Dump visualizations if needed.
-        if visualization_dump is not None:
-            visualization_dump["depth"] = rearrange(
-                depths, "b v (h w) srf s -> b v h w srf s", h=h, w=w
-            )
-            visualization_dump["scales"] = rearrange(
-                gaussians.scales, "b v r srf spp xyz -> b (v r srf spp) xyz"
-            )
-            visualization_dump["rotations"] = rearrange(
-                gaussians.rotations, "b v r srf spp xyzw -> b (v r srf spp) xyzw"
-            )
+    def forward(
+        self,
+        context: dict,
+        global_step: int,
+        deterministic: bool = False,
+        visualization_dump: Optional[dict] = None,
+        scene_names: Optional[list] = None,
+        ) :
+        
+        b, v, _, h, w = context["image"].shape      # 224, 320
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # Optionally apply a per-pixel opacity.
-        opacity_multiplier = 1
+        # depths = get_zoe_depth(self.zoe, context["image"], vis=False).to(densities.device) # b v 1 h w        
+        for k in context:
+            if context[k].device != device:
+                context[k] = context[k].to(device)
 
-        return Gaussians(
-            rearrange(
-                gaussians.means,
-                "b v r srf spp xyz -> b (v r srf spp) xyz",
-            ),
-            rearrange(
-                gaussians.covariances,
-                "b v r srf spp i j -> b (v r srf spp) i j",
-            ),
-            rearrange(
-                gaussians.harmonics,
-                "b v r srf spp c d_sh -> b (v r srf spp) c d_sh",
-            ),
-            rearrange(
-                opacity_multiplier * gaussians.opacities,
-                "b v r srf spp -> b (v r srf spp)",
-            ),
-        )
+        data = self.data_process(context["image"])  # input size must be divides by 32
+        fpn_features, cnn_features = self.matcher(data, 
+                                                  self.return_cnn_features,
+                                                  self.cfg.wo_fpn_depth) 
+        
+        # Sample depths from the resulting features.
+        extra_info = {}
+        extra_info['images'] = rearrange(context["image"], "b v c h w -> (v b) c h w")
+        extra_info["scene_names"] = scene_names
+        gpp = self.cfg.gaussians_per_pixel
+
+        # trans_features are same with cnn_features 
+        trans_features = self.get_trans_feature(fpn_features) 
+        cnn_features = self.get_cnn_feature(cnn_features) 
+        
+
+        if self.cfg.wo_fpn_depth: # single layer, [b,v,128,56,60]
+            in_feats = trans_features[1] 
+            depths, densities, raw_gaussians = self.depth_predictor(
+                in_feats,
+                context["intrinsics"],
+                context["extrinsics"],
+                context["near"],
+                context["far"],
+                gaussians_per_pixel=gpp,
+                deterministic=deterministic,
+                extra_info=extra_info,
+                cnn_features=cnn_features,
+                wo_fpn_depth=self.cfg.wo_fpn_depth
+            )
+            gaussians = self.convert_fd_to_gaussians(h,w, context, depths, 
+                    raw_gaussians, densities, global_step, device)
+            
+            # Dump visualizations if needed.
+            if visualization_dump is not None:
+                visualization_dump["depth"] = rearrange(
+                    depths, "b v (h w) srf s -> b v h w srf s", h=h, w=w
+                )
+                visualization_dump["scales"] = rearrange(
+                    gaussians.scales, "b v r srf spp xyz -> b (v r srf spp) xyz"
+                )
+                visualization_dump["rotations"] = rearrange(
+                    gaussians.rotations, "b v r srf spp xyzw -> b (v r srf spp) xyzw"
+                )
+
+            # Optionally apply a per-pixel opacity.
+            opacity_multiplier = 1
+
+            return Gaussians(
+                rearrange(
+                    gaussians.means,
+                    "b v r srf spp xyz -> b (v r srf spp) xyz",
+                ),
+                rearrange(
+                    gaussians.covariances,
+                    "b v r srf spp i j -> b (v r srf spp) i j",
+                ),
+                rearrange(
+                    gaussians.harmonics,
+                    "b v r srf spp c d_sh -> b (v r srf spp) c d_sh",
+                ),
+                rearrange(
+                    opacity_multiplier * gaussians.opacities,
+                    "b v r srf spp -> b (v r srf spp)",
+                ),
+            )
     
+        else: # 2/3 layers
+            if self.use_d8_depth:
+                trans_features, cnn_features = self.add_d8_feature( trans_features, cnn_features)
+            
+            
+
+            fpn_gaussians= []
+            for in_feat, cnn_feat, depth_predictor, downscale_factor \
+                in zip(trans_features, cnn_features, \
+                       self.fpn_depth_predictor,self.downscale_factor):
+                depths, densities, raw_gaussians = depth_predictor(
+                    in_feat,
+                    context["intrinsics"],
+                    context["extrinsics"],
+                    context["near"],
+                    context["far"],
+                    gaussians_per_pixel=gpp,
+                    deterministic=deterministic,
+                    extra_info=extra_info,
+                    cnn_features=cnn_feat,
+                    wo_fpn_depth=self.cfg.wo_fpn_depth)
+                b, v, _, h, w = context["image"].shape 
+                h, w = int(h / downscale_factor *2),  int(w / downscale_factor*2)
+                gaussians = self.convert_fd_to_gaussians(h,w, context, depths, 
+                    raw_gaussians, densities, global_step, device)
+
+                # Dump visualizations if needed.
+                if visualization_dump is not None:
+                    idx = 'P' + str(int(downscale_factor))
+                    visualization_dump[idx] = {}
+                    visualization_dump[idx]["depth"] = rearrange(
+                        depths, "b v (h w) srf s -> b v h w srf s", h=h, w=w
+                    )
+                    visualization_dump[idx]["scales"] = rearrange(
+                        gaussians.scales, "b v r srf spp xyz -> b (v r srf spp) xyz"
+                    )
+                    visualization_dump[idx]["rotations"] = rearrange(
+                        gaussians.rotations, "b v r srf spp xyzw -> b (v r srf spp) xyzw"
+                    )
+                # Optionally apply a per-pixel opacity.
+                opacity_multiplier = 1
+
+                fpn_gaussians.append(Gaussians(
+                    rearrange(
+                        gaussians.means,
+                        "b v r srf spp xyz -> b (v r srf spp) xyz",
+                    ),
+                    rearrange(
+                        gaussians.covariances,
+                        "b v r srf spp i j -> b (v r srf spp) i j",
+                    ),
+                    rearrange(
+                        gaussians.harmonics,
+                        "b v r srf spp c d_sh -> b (v r srf spp) c d_sh",
+                    ),
+                    rearrange(
+                        opacity_multiplier * gaussians.opacities,
+                        "b v r srf spp -> b (v r srf spp)",
+                    ),
+                ))
+            return fpn_gaussians
+
+
     def get_data_shim(self) -> DataShim:
         def data_shim(batch: BatchedExample) -> BatchedExample:
             batch = apply_patch_shim(
