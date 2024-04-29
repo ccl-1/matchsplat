@@ -89,7 +89,7 @@ class FinePreprocess(nn.Module):
             feat_f0 = feat_f0[data['b_ids'], data['i_ids']]  # [n, ww, cf]
             feat_f1 = feat_f1[data['b_ids'], data['j_ids']]
 
-            return feat_f0, feat_f1, [x1, x2_out, feat_c_out]
+            return feat_f0, feat_f1, [x2_out, feat_c_out]
         else:  # handle different input shapes
             feat_c0, feat_c1 = rearrange(feat_c0, 'b (h w) c -> b c h w', h=data['hw0_c'][0]), rearrange(feat_c1, 'b (h w) c -> b c h w', h=data['hw1_c'][0]) # 1/8 feat
             x2_0, x2_1 = data['feats_x2_0'], data['feats_x2_1'] # 1/4 feat

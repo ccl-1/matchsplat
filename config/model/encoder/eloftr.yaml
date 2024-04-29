@@ -1,7 +1,7 @@
 name: eloftr
 
 d_feature: 128            # ======================================================= Number of output channels of the backbone = costvolume_unet_feat_dim
-num_depth_candidates: 32
+num_depth_candidates: 128 # 32
 num_surfaces: 1
 
 visualizer:
@@ -20,6 +20,7 @@ opacity_mapping:
   final: 0.0
   warm_up: 1
 
+
 # params for multi-view depth predictor
 eloftr_weights_path: "checkpoints/eloftr_outdoor.ckpt"
 costvolume_unet_feat_dim: 128 # = d_feature
@@ -36,6 +37,9 @@ wo_depth_refine: false         # Table 3: base
 wo_cost_volume: false          # Table 3: w/o cost volume
 wo_backbone_cross_attn: false  # Table 3: w/o cross-view attention
 wo_cost_volume_refine: false   # Table 3: w/o U-Net
+# wo_fpn_depth: true           # w/o depth Fpn 
+wo_fpn_depth: false           # w/o depth Fpn 
+
 
 
 

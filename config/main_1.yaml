@@ -4,6 +4,7 @@ defaults:
   - model/encoder: eloftr
   - model/decoder: splatting_cuda
   - loss: [mse]
+  # - loss: [mse, lpips, depth]
 
 wandb:
   project: mvsplat
@@ -12,8 +13,8 @@ wandb:
   mode: disabled
   id: null
 
-# mode: train
-mode: test
+mode: train
+# mode: test
 
 
 dataset:
@@ -43,13 +44,15 @@ optimizer:
   cosine_lr: true
 
 checkpointing:
-  load: 'checkpoints/depth_predictor.ckpt'
-  every_n_train_steps: 999  # 5000
+  # load: 'checkpoints/depth_predictor.ckpt'
+  load: 'checkpoints/re10k.ckpt'
+  every_n_train_steps: 1000  # 5000
   save_top_k: -1
   pretrained_model: null
 
 train:
   depth_mode: null
+  # depth_mode: depth
   extended_visualization: false
   print_log_every_n_steps: 1
 

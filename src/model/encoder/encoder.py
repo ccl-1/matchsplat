@@ -22,7 +22,8 @@ class Encoder(nn.Module, ABC, Generic[T]):
         self,
         context: BatchedViews,
         deterministic: bool,
-    ) -> Gaussians:
+    # ) -> Gaussians:
+    ) -> Generic[T]:
         pass
 
     def get_data_shim(self) -> DataShim:

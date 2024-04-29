@@ -110,7 +110,7 @@ def prepare_feat_proj_data_lists(
     intr_curr[:, :, 0, :] *= float(w)
     intr_curr[:, :, 1, :] *= float(h)
     intr_curr = rearrange(intr_curr, "b v ... -> (v b) ...", b=b, v=v)  # [vxb 3 3]
-
+  
     # prepare depth bound (inverse depth) [v*b, d]
     min_depth = rearrange(1.0 / far.clone().detach(), "b v -> (v b) 1")
     max_depth = rearrange(1.0 / near.clone().detach(), "b v -> (v b) 1")
@@ -160,10 +160,10 @@ class DepthPredictorMultiView(nn.Module):
         # Table 3: w/o U-Net
         self.wo_cost_volume_refine = wo_cost_volume_refine
 
-        # Cost volume refinement: 2D U-Net
+        # Cost volume refinement: 2D U-Net        
         input_channels = feature_channels if wo_cost_volume else (num_depth_candidates + feature_channels)
         channels = self.regressor_feat_dim
-        
+
         if wo_cost_volume_refine:
             self.corr_project = nn.Conv2d(input_channels, channels, 3, 1, 1)
         else:
@@ -204,6 +204,17 @@ class DepthPredictorMultiView(nn.Module):
         # CNN-based feature upsampler
         proj_in_channels = feature_channels + feature_channels
         upsample_out_channels = feature_channels
+
+        self.conv_1x1 = nn.Sequential(
+            nn.Conv2d(proj_in_channels, upsample_out_channels, 3, 1, 1),
+            nn.Upsample(
+                scale_factor=2,
+                mode="bilinear",
+                align_corners=True,
+            ),
+            nn.GELU(),
+            )
+
         self.upsampler = nn.Sequential(
             nn.Conv2d(proj_in_channels, upsample_out_channels, 3, 1, 1),
             nn.Upsample(
@@ -275,6 +286,7 @@ class DepthPredictorMultiView(nn.Module):
         deterministic=True,
         extra_info=None,
         cnn_features=None,
+        wo_fpn_depth=False
     ):
         """IMPORTANT: this model is in (v b), NOT (b v), due to some historical issues.
         keep this in mind when performing any operation related to the view dim"""
@@ -282,8 +294,7 @@ class DepthPredictorMultiView(nn.Module):
         # format the input
         b, v, c, h, w = features.shape
         feat_comb_lists, intr_curr, pose_curr_lists, disp_candi_curr = (
-            # TODO: GT pose for now, Pose need to be estimated in prepare_feat_proj_data_lists
-            prepare_feat_proj_data_lists( 
+            prepare_feat_proj_data_lists( # adjust intrinsics according to scale
                 features,
                 intrinsics,
                 extrinsics,
@@ -312,13 +323,8 @@ class DepthPredictorMultiView(nn.Module):
                     warp_padding_mode="zeros",
                 )  # [B, C, D, H, W]
                 # calculate similarity
-                raw_correlation_in = (feat01.unsqueeze(2) * feat01_warped).sum(
-                    1
-                ) / (
-                    c**0.5
-                )  # [vB, D, H, W]
+                raw_correlation_in = (feat01.unsqueeze(2) * feat01_warped).sum(1) / (c**0.5)  # [vB, D, H, W]
                 raw_correlation_in_lists.append(raw_correlation_in)
-
             # average all cost volumes
             raw_correlation_in = torch.mean(
                 torch.stack(raw_correlation_in_lists, dim=0), dim=0, keepdim=False
@@ -329,43 +335,44 @@ class DepthPredictorMultiView(nn.Module):
         if self.wo_cost_volume_refine:
             raw_correlation = self.corr_project(raw_correlation_in)
         else:
-            raw_correlation = self.corr_refine_net(raw_correlation_in)  # (vb d h w)
+            raw_correlation = self.corr_refine_net(raw_correlation_in)  # (vb d h w) # input_channel
             # apply skip connection
-            raw_correlation = raw_correlation + self.regressor_residual(
-                raw_correlation_in
-            )
+            raw_correlation = raw_correlation + self.regressor_residual(raw_correlation_in)
 
         # softmax to get coarse depth and density
-        pdf = F.softmax(
-            self.depth_head_lowres(raw_correlation), dim=1
-        )  # [2xB, D, H, W]
-        coarse_disps = (disp_candi_curr * pdf).sum(
-            dim=1, keepdim=True
-        )  # (vb, 1, h, w)
+        pdf = F.softmax(self.depth_head_lowres(raw_correlation), dim=1)  # [2xB, D, H, W]
+        coarse_disps = (disp_candi_curr * pdf).sum(dim=1, keepdim=True)  # (vb, 1, h, w)
         pdf_max = torch.max(pdf, dim=1, keepdim=True)[0]  # argmax
-        pdf_max = F.interpolate(pdf_max, scale_factor=self.upscale_factor)
-        fullres_disps = F.interpolate(
-            coarse_disps,
-            scale_factor=self.upscale_factor,
-            mode="bilinear",
-            align_corners=True,
-        )
 
-        # depth refinement
-        proj_feat_in_fullres = self.upsampler(torch.cat((feat01, cnn_features), dim=1)) # [2, 256, 112, 160]
-        proj_feature = self.proj_feature(proj_feat_in_fullres) 
-
-        refine_out = self.refine_unet(torch.cat( 
-            (extra_info["images"], proj_feature, fullres_disps, pdf_max), dim=1))
+        if wo_fpn_depth:
+            pdf_max = F.interpolate(pdf_max, scale_factor=self.upscale_factor)
+            fullres_disps = F.interpolate( # recover to full resolution
+                coarse_disps,
+                scale_factor=self.upscale_factor,
+                mode="bilinear",
+                align_corners=True)
+            # depth refinement
+            proj_feat_in_fullres = self.upsampler(torch.cat((feat01, cnn_features), dim=1)) # [2, 256, 112, 160]
+            proj_feature = self.proj_feature(proj_feat_in_fullres) 
+            extra_info_imgs = extra_info["images"]
+            refine_out = self.refine_unet(torch.cat( 
+                (extra_info_imgs, proj_feature, fullres_disps, pdf_max), dim=1))
+        else:
+            # depth refinement
+            # fullres_disps = coarse_disps
+            fullres_disps = F.interpolate( coarse_disps, scale_factor=2, mode="bilinear", align_corners=True)
+            pdf_max = F.interpolate(pdf_max, scale_factor=2)
+            proj_feat_in_fullres = self.conv_1x1(torch.cat((feat01, cnn_features), dim=1)) 
+            proj_feature = self.proj_feature(proj_feat_in_fullres) 
+            extra_info_imgs =  F.interpolate(extra_info["images"], scale_factor= 2.0 /self.upscale_factor)
+            refine_out = self.refine_unet(torch.cat( 
+                (extra_info_imgs, proj_feature, fullres_disps, pdf_max), dim=1))
 
         # gaussians head
-        raw_gaussians_in = [refine_out,
-                            extra_info["images"], proj_feat_in_fullres]
+        raw_gaussians_in = [refine_out, extra_info_imgs, proj_feat_in_fullres]
         raw_gaussians_in = torch.cat(raw_gaussians_in, dim=1)
         raw_gaussians = self.to_gaussians(raw_gaussians_in)
-        raw_gaussians = rearrange(
-            raw_gaussians, "(v b) c h w -> b v (h w) c", v=v, b=b
-        )
+        raw_gaussians = rearrange(raw_gaussians, "(v b) c h w -> b v (h w) c", v=v, b=b)
 
         if self.wo_depth_refine:
             densities = repeat(
