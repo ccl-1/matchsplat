@@ -90,7 +90,7 @@ def train(cfg_dict: DictConfig):
 
     # Set up checkpointing.
     callbacks.append(
-        ModelCheckpoint(
+        ModelCheckpoint( 
             output_dir / "checkpoints",
             every_n_train_steps=cfg.checkpointing.every_n_train_steps,
             save_top_k=cfg.checkpointing.save_top_k,
