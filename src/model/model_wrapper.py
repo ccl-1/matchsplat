@@ -159,48 +159,6 @@ class ModelWrapper(LightningModule):
         batch["context"]["rendered_img"] = output_context.color
         batch["context"]["rendered_depth"] = output_context.depth
          
-        """ 
-        #  ------------------------- for test ------------------------------------------------
-        from ..geometry.projection import sample_image_grid
-        from ..geometry.projection import get_world_rays
-        from einops.einops import rearrange
-        import open3d as o3d
-
-        depths = output_context.depth
-        for i in range(gaussians.means.shape[0]):
-            gs_i = gaussians.means[i].clone().detach().cpu().numpy()
-            save_points_ply(gs_i,f"outputs/tmp/loftr/iproj_worldf{i}.ply")
-        i=0
-
-        img0 = batch['context']['image'][i, 0]
-        img1 = batch['context']['image'][i, 1]
-        save_image(img0, f"outputs/tmp/loftr/img0.png")
-        save_image(img1, f"outputs/tmp/loftr/img1.png")
-
-        ht, wd = depths[i].shape[-2:]
-        depth_combined = depths[i].reshape(2, -1)
-        xy_ray,_ = sample_image_grid(((ht, wd)), depths .device)
-        xy_ray = xy_ray.reshape(1,-1,2).repeat(2, 1, 1)
-        extrs = batch["context"]["extrinsics"][i].clone()
-        intrs = batch["context"]["intrinsics"][i].clone()
-
-        origins, directions = get_world_rays(xy_ray, 
-                    rearrange(extrs, "v i j -> v () i j"), rearrange(intrs, "v i j -> v () i j"))
-        
-        pts3d_world = origins[:1] + directions[:1] * depth_combined[:1][..., None]
-        save_points_ply(pts3d_world.reshape(-1, 3), f"outputs/tmp/loftr/iproj_world{i}_rendered_1.ply")
-        pts3d_world = origins[1:] + directions[1:] * depth_combined[1:][..., None]
-        save_points_ply(pts3d_world.reshape(-1, 3), f"outputs/tmp/loftr/iproj_world{i}_rendered_2.ply")
-
-        pcd1 = o3d.io.read_point_cloud(f"outputs/tmp/loftr/iproj_world{i}_rendered_1.ply")
-        pcd2 = o3d.io.read_point_cloud(f"outputs/tmp/loftr/iproj_world{i}_rendered_2.ply")
-        pcd1 = pcd1.paint_uniform_color([1, 0, 0])  #red
-        pcd2 = pcd2.paint_uniform_color([0, 0, 1])  
-        pcd_combined = pcd1 + pcd2 
-        o3d.io.write_point_cloud(f"outputs/tmp/loftr/iproj_world{i}_rendered_combined.ply", pcd_combined)
-        input()
-        """
-
         # Compute metrics.
         psnr_probabilistic = compute_psnr(
             rearrange(target_gt, "b v c h w -> (b v) c h w"),

@@ -3,7 +3,8 @@
 defaults:
   - override /dataset: re10k
   - override /model/encoder: eloftr
-  - override /loss: [mse, lpips, zoe]
+  # - override /loss: [mse, lpips, zoe]
+  - override /loss: [mse, lpips, corres]
   # - override /loss: [mse, lpips, depth, scale, corres]
 
 wandb:
@@ -15,7 +16,7 @@ data_loader:
     batch_size: 1 # 14
 
 trainer:
-  max_steps: 10000 # 300_001
+  max_steps: 1000 # 300_001
 # output_dir: outputs/fpn # checkpoint save path
 
 # ----- Additional params for default best model customization
@@ -47,6 +48,13 @@ dataset:
   far: 100.
   baseline_scale_bounds: false
   make_baseline_1: false
+
+  view_sampler:
+    # initial_min_distance_between_context_views: 25 
+    # initial_max_distance_between_context_views: 45
+    initial_min_distance_between_context_views: 35 
+    initial_max_distance_between_context_views: 85 
+
 
 train:
   depth_mode: depth

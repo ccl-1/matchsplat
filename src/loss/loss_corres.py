@@ -24,11 +24,6 @@ from plyfile import PlyData, PlyElement
 from torchvision.utils import save_image
 from PIL import Image
 
-# 深度图训练出来有问题， 高斯球都是重叠的
-
-# 感觉我们可以用zoedepth那个深度图来测试一下，看他出来的有没有折叠。
-# 如果他的没问题，用它作为真值深度图来校准训练的深度图这种可以吗
-
 
 def save_points_ply(points, path):
     vertex = np.array([(points[i][0], points[i][1], points[i][2]) 
@@ -67,7 +62,7 @@ def iproj_full_img(depth, intr):
     i = torch.ones_like(depth)
     X = (x - cx) / fx
     Y = (y - cy) / fy
-    pts = torch.stack([X, Y, i], dim=-1) * depth.unsqueeze(-1)
+    pts = torch.stack([X, Y, i], dim=-1) * depth.unsqueeze(-1) 
     # pts = torch.stack([pts, i], dim=-1)
     return pts.reshape(-1, 3)
 
@@ -97,6 +92,16 @@ def from_homogeneous(points: Union[torch.Tensor, np.ndarray]):
     """
     return points[..., :-1] / (points[..., -1:] + 1e-6)
 
+# def iproj_kpts(depth, intr, mkpts):
+#     fx, fy, cx, cy = intr[0, 0], intr[1, 1], intr[0, 2], intr[1, 2]
+#     x = mkpts[:, 0]
+#     y = mkpts[:, 1]
+#     z = depth[y.long().squeeze(), x.long().squeeze()]
+#     i = torch.ones_like(z)
+#     X = (x - cx) / fx
+#     Y = (y - cy) / fy
+#     pts_3d = torch.stack([X, Y, i], dim=-1) * z.unsqueeze(-1).view(-1, 1)
+#     return pts_3d
 
 def iproj_kpts(
         depth: Float[Tensor, "h w"], 
@@ -105,20 +110,20 @@ def iproj_kpts(
     )-> Float[Tensor, "N 3"]:
 
     z = depth[mkpts[:, 1].long().squeeze(), mkpts[:, 0].long().squeeze()]
-    kpts_3d_0 = to_homogeneous(mkpts) @ torch.inverse(intr).transpose(-1, -2)
+    kpts_3d_0 = to_homogeneous(mkpts) @ torch.inverse(intr).transpose(-1, -2) 
     kpts_3d_0 = kpts_3d_0 * z.view(-1, 1)
-
     return kpts_3d_0
 
 def pc_transform(pts3d_i: Float[Tensor, "N 3"], Tij: Float[Tensor, "4 4"])-> Float[Tensor, "N 3"]:
     Tij = Tij.transpose(-1, -2)
     pts3d_i = pts3d_i @ Tij[:3, :3]
-    pts3d_i = pts3d_i + Tij[:3, -1:].transpose(0,1).repeat(pts3d_i.size()[0],1)
+    pts3d_i = pts3d_i  + Tij[:3, -1:].transpose(0,1).repeat(pts3d_i.size()[0],1)
     return pts3d_i
-    # return from_homogeneous(to_homogeneous(pts3d_i) @ Tij.transpose(-1, -2))
+    return from_homogeneous(to_homogeneous(pts3d_i) @ Tij.transpose(-1, -2))
 
 def proj(pts3d: Float[Tensor, "N 3"], intr: Float[Tensor, "3 3"])->Float[Tensor, "N 2"]:
     return from_homogeneous(pts3d @ intr.transpose(-1, -2))
+
 
 def projective_transform(
         T01: Float[Tensor, "4 4"], 
@@ -127,7 +132,7 @@ def projective_transform(
         intr1: Float[Tensor, "3 3"], 
         mkpts0: Float[Tensor, "N 2"],
         return_kpts_pc=False):
-    X0 = iproj_kpts(depth0, intr0, mkpts0)
+    X0 = iproj_kpts(depth0, intr0, mkpts0) # 反投影，# 像素=>相机
     X1 = pc_transform(X0, T01)
     x1 = proj(X1, intr1)
     if return_kpts_pc:
@@ -160,12 +165,10 @@ def triangulate_point_from_multiple_views_linear_torch(proj_matricies, points, c
 
     point_3d_homo = -vh[:, 3]
     point_3d = from_homogeneous(point_3d_homo.unsqueeze(0))[0]
-
     return point_3d
 
 def huber_loss(pred: torch.Tensor, label: torch.Tensor, reduction: str='none'):
         return torch.nn.functional.huber_loss(pred, label, reduction=reduction) 
-
 
 @dataclass
 class LossCorresCfg:
@@ -196,7 +199,6 @@ class LossCorres(Loss[LossCorresCfg, LossCorresCfgWrapper]):
         # assert srf == 1 and s == 1
 
         loss = 0.
-    
         loss_repro = 0.
         loss_depth = 0.
 
@@ -204,7 +206,7 @@ class LossCorres(Loss[LossCorresCfg, LossCorresCfgWrapper]):
         for i in range(b):
             b_mask = mbids == i
             mkpts0 = batch["mkpts0"][b_mask]
-            mkpts1 = batch["mkpts0"][b_mask]
+            mkpts1 = batch["mkpts1"][b_mask]
             mconf = batch["mconf"][b_mask]
 
             extr0 = batch["context"]["extrinsics"][i, 0].clone().detach()
@@ -226,87 +228,44 @@ class LossCorres(Loss[LossCorresCfg, LossCorresCfgWrapper]):
 
             depth0 = depths[i, 0].view(h, w)
             depth1 = depths[i, 1].view(h, w)
-
             depth0 = 1. / depth0
             depth1 = 1. / depth1
 
-            if self.cfg.use_corres_repro:
-                ht, wd = depths[i].shape[-2:]
-                depth_combined = depths[i].reshape(2, -1)
-                xy_ray,_ = sample_image_grid(((ht, wd)), depths .device)
-                xy_ray = xy_ray.reshape(1,-1,2).repeat(2, 1, 1)
-                extrs = batch["context"]["extrinsics"][i].clone()
-                intrs = batch["context"]["intrinsics"][i].clone()
-
-                origins, directions = get_world_rays(xy_ray, 
-                            rearrange(extrs, "v i j -> v () i j"), rearrange(intrs, "v i j -> v () i j"))
-                pts3d_world = origins + directions * depth_combined[..., None]
-                pts3d_world = pts3d_world.reshape(-1, 3)
-                save_points_ply(pts3d_world, f"outputs/tmp/iproj_world{i}_step{global_step}.ply")
-                
-                pcd1 = o3d.io.read_point_cloud(f"outputs/tmp/iproj_worldf{i}.ply")
-                pcd2 = o3d.io.read_point_cloud(f"outputs/tmp/iproj_world{i}_step{global_step}.ply")
-                pcd1 = pcd1.paint_uniform_color([1, 0, 0])  
-                pcd2 = pcd2.paint_uniform_color([0, 0, 1])  
-                pcd_combined = pcd1 + pcd2 
-                o3d.io.write_point_cloud(f"outputs/tmp/iproj_world{i}_step{global_step}_combined_1.ply", pcd_combined)
-                
-                
+            if self.cfg.use_corres_repro:                
                 T01 = torch.inverse(extr1) @ extr0
                 T10 = torch.inverse(extr0) @ extr1
                 # Reprojection error with the estimated depth from 0->1 and 1->0
                 x0_1, X0 = projective_transform(T01, depth0, intr0, intr1, mkpts0, True)
                 x1_0, X1 = projective_transform(T10, depth1, intr1, intr0, mkpts1, True)
 
-                # @TODO Add the mask for filtering out those with large reprojection error 
-                loss0_1 = torch.sum(mconf * torch.norm(x0_1 - mkpts1, dim=-1))
-                loss1_0 = torch.sum(mconf * torch.norm(x1_0 - mkpts0, dim=-1))
+                mask_0 = (x0_1[:, 0] >= 0) & (x0_1[:, 0] < w) & (x0_1[:, 1] >= 0) & (x0_1[:, 1] < h)
+                mask_1 = (x1_0[:, 0] >= 0) & (x1_0[:, 0] < w) & (x1_0[:, 1] >= 0) & (x1_0[:, 1] < h)
+                
 
+                # @TODO Add the mask for filtering out those with large reprojection error 
+                loss0_1 = torch.sum(mconf[mask_0] * torch.norm(x0_1[mask_0] - mkpts1[mask_0], dim=-1))
+                loss1_0 = torch.sum(mconf[mask_1] * torch.norm(x1_0[mask_1] - mkpts0[mask_1], dim=-1))
                 loss_repro += (loss0_1 + loss1_0) / 2.
 
                 # """ 
                 if global_step % 10 == 0:
-
+                    x0_1, mkpts0 = x0_1[mask_0], mkpts0[mask_0]
+                    x1_0, mkpts1 = x1_0[mask_1], mkpts1[mask_1]
                     pts3d_0 = iproj_full_img(depth0, intr0)
                     perm = torch.randperm(pts3d_0.size(0))
                     idx = perm[:1000]
                     pts3d_0 = pts3d_0[idx]
-                    
-                    save_points_ply(pts3d_0.clone().detach().cpu().numpy(), f"outputs/tmp/iproj_full_batch{i}_step{global_step}.ply")
-                    plt.figure()
-                    plt.imshow(img0_numpy)
-                    plt.savefig(f"outputs/tmp/img0_batch{i}_step{global_step}.png")
-                    plt.figure()
-                    plt.imshow(img1_numpy)
-                    plt.savefig(f"outputs/tmp/img1_batch{i}_step{global_step}.png")
-
-
-                    
-                    depth0_viz = viz_depth_tensor(1. / depth0.clone().detach().cpu(), True)
-                    depth1_viz = viz_depth_tensor(1. / depth1.clone().detach().cpu(), True)
-                    depth0_viz = Image.fromarray(depth0_viz)
-                    depth1_viz = Image.fromarray(depth1_viz)
-                    depth0_viz.save(f"outputs/tmp/depth0_batch{i}_step{global_step}.png")
-                    depth1_viz.save(f"outputs/tmp/depth1_batch{i}_step{global_step}.png")
-
-                    # save_image(depth0_viz.long(), f"outputs/tmp/depth0_batch{i}_step{global_step}.png")
-                    # save_image(depth1_viz.long(), f"outputs/tmp/depth1_batch{i}_step{global_step}.png")
-
+                   
                     plt.figure()
                     fig, ax = plt.subplots(nrows=1, ncols=2)
                     ax[0].imshow(img0_numpy)
                     ax[0].scatter(x1_0[:, 0].clone().detach().cpu().numpy(), x1_0[:, 1].clone().detach().cpu().numpy(), s=1, c='red')
                     ax[0].scatter(mkpts0[:, 0].clone().detach().cpu().numpy(), mkpts0[:, 1].clone().detach().cpu().numpy(), s=1, c='blue')
+                    
                     ax[1].imshow(img1_numpy)
                     ax[1].scatter(x0_1[:, 0].clone().detach().cpu().numpy(), x0_1[:, 1].clone().detach().cpu().numpy(), s=1, c='red')
                     ax[1].scatter(mkpts1[:, 0].clone().detach().cpu().numpy(), mkpts1[:, 1].clone().detach().cpu().numpy(), s=1, c='blue')
                     plt.savefig(f"outputs/tmp/reproj_120_021_batch{i}_step{global_step}.png")
-
-                    save_points_ply(X0.clone().detach().cpu().numpy(), f"outputs/tmp/iproj_kpts0_batch{i}_step{global_step}.ply")
-                    save_points_ply(X1.clone().detach().cpu().numpy(), f"outputs/tmp/iproj_kpts1_batch{i}_step{global_step}.ply")
-
-                    
-
                     input()
 
                 # """
