@@ -150,6 +150,7 @@ def train(cfg_dict: DictConfig):
     # depth_ckpt_path = "checkpoints/re10k.ckpt"
     # encoder.load_state_dict(torch.load(depth_ckpt_path), strict=False) # only load weight of depth_predictor
 
+    # encoder_ckpt_path = "checkpoints/zoe_refined_small.ckpt"
     encoder_ckpt_path = "checkpoints/epoch_256-step_10k.ckpt"
     model_wrapper.load_state_dict(torch.load(encoder_ckpt_path)['state_dict'], strict=False)
     

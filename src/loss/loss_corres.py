@@ -170,6 +170,25 @@ def triangulate_point_from_multiple_views_linear_torch(proj_matricies, points, c
 def huber_loss(pred: torch.Tensor, label: torch.Tensor, reduction: str='none'):
         return torch.nn.functional.huber_loss(pred, label, reduction=reduction) 
 
+def smoothness_loss(depth_map):
+    tv_loss = np.sum(np.abs(np.diff(depth_map, axis=0))) + np.sum(np.abs(np.diff(depth_map, axis=1)))
+    return tv_loss
+
+def smoothness_loss2(depth, image):
+    depth_dx = torch.abs(depth[:, :, :, 1:] - depth[:, :, :, :-1])
+    depth_dy = torch.abs(depth[:, :, 1:, :] - depth[:, :, :-1, :])
+    
+    image_dx = torch.abs(image[:, :, :, 1:] - image[:, :, :, :-1])
+    image_dy = torch.abs(image[:, :, 1:, :] - image[:, :, :-1, :])
+    
+    weights_x = torch.exp(-torch.mean(image_dx, 1, keepdim=True))
+    weights_y = torch.exp(-torch.mean(image_dy, 1, keepdim=True))
+    
+    smoothness_x = depth_dx * weights_x
+    smoothness_y = depth_dy * weights_y
+    return (smoothness_x.mean() + smoothness_y.mean()) / 2.0
+
+
 @dataclass
 class LossCorresCfg:
     weight_repro: float
@@ -177,7 +196,7 @@ class LossCorresCfg:
     use_corres_depth: bool
     use_corres_repro: bool
 
-
+# https://github.com/aim-uofa/AdelaiDepth/tree/main
 @dataclass
 class LossCorresCfgWrapper:
     corres: LossCorresCfg
@@ -191,6 +210,10 @@ class LossCorres(Loss[LossCorresCfg, LossCorresCfgWrapper]):
         global_step: int,
     ) -> Float[Tensor, ""]:
         depths = batch["context"]["rendered_depth"]
+        # near, far = 0.0, 100.0
+        # depths = batch["context"]["est_depth"].squeeze(-1).squeeze(-1) # b v h w srf s -> b v h w
+        # depths = torch.clamp(depths, near, far) # np.clip
+        # 深度图需要恢复 shift .. 
         mbids = batch["mbids"]
 
         b, v, h, w = depths.shape
@@ -220,7 +243,6 @@ class LossCorres(Loss[LossCorresCfg, LossCorresCfgWrapper]):
             intr1[0, :] *= w
             intr1[1, :] *= h
 
-
             img0 = batch['context']['image'][i, 0]
             img1 = batch['context']['image'][i, 1]
             img0_numpy = img0.clone().detach().cpu().numpy().transpose(1, 2, 0)
@@ -241,14 +263,14 @@ class LossCorres(Loss[LossCorresCfg, LossCorresCfgWrapper]):
                 mask_0 = (x0_1[:, 0] >= 0) & (x0_1[:, 0] < w) & (x0_1[:, 1] >= 0) & (x0_1[:, 1] < h)
                 mask_1 = (x1_0[:, 0] >= 0) & (x1_0[:, 0] < w) & (x1_0[:, 1] >= 0) & (x1_0[:, 1] < h)
                 
-
-                # @TODO Add the mask for filtering out those with large reprojection error 
                 loss0_1 = torch.sum(mconf[mask_0] * torch.norm(x0_1[mask_0] - mkpts1[mask_0], dim=-1))
                 loss1_0 = torch.sum(mconf[mask_1] * torch.norm(x1_0[mask_1] - mkpts0[mask_1], dim=-1))
                 loss_repro += (loss0_1 + loss1_0) / 2.
 
-                # """ 
-                if global_step % 10 == 0:
+                smooth_loss = smoothness_loss(depth0) + smoothness_loss(depth1)
+                total_loss = loss_repro +   smooth_loss / 2.
+                
+                if False:
                     x0_1, mkpts0 = x0_1[mask_0], mkpts0[mask_0]
                     x1_0, mkpts1 = x1_0[mask_1], mkpts1[mask_1]
                     pts3d_0 = iproj_full_img(depth0, intr0)
@@ -268,7 +290,7 @@ class LossCorres(Loss[LossCorresCfg, LossCorresCfgWrapper]):
                     plt.savefig(f"outputs/tmp/reproj_120_021_batch{i}_step{global_step}.png")
                     input()
 
-                # """
+                
             if self.cfg.use_corres_depth:
                 # Compute "gt" depth with triangulation, estimated point cloud in world coordinate
                 proj_mat0 = torch.matmul(intr0, extr0.inverse()[:3])
@@ -308,9 +330,7 @@ class LossCorres(Loss[LossCorresCfg, LossCorresCfgWrapper]):
 
         # Devided by the number of all matched keypoints
         loss += self.cfg.weight_repro * (loss_repro / float(len(mkpts0)))
-        loss += self.cfg.weight_depth * (loss_depth / float(len(mkpts0)))
-
-
+        # loss += self.cfg.weight_depth * (loss_depth / float(len(mkpts0)))
         return loss
 
         

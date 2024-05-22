@@ -76,7 +76,6 @@ def mse_loss(prediction, target, mask, reduction=reduction_image_based):
     M = torch.sum(mask, (1, 2))
     res = prediction - target
     image_loss = torch.sum(mask * res * res, (1, 2))
-
     return reduction(image_loss, 2 * M)
 
 def logl1_loss(prediction, target, mask, reduction=reduction_image_based):
@@ -87,17 +86,38 @@ def logl1_loss(prediction, target, mask, reduction=reduction_image_based):
     return reduction(image_loss, M)
 
 def depth_loss(prediction, target, mask):
+    """ 
+    prediction  [Tensor, "B H W"]
+    target      [Tensor, "B H W"]
+    mask        [Tensor, "B H W"]
+    """
     scale, shift = compute_scale_and_shift(prediction, target, mask)
     prediction_ssi = scale.view(-1, 1, 1) * prediction + shift.view(-1, 1, 1)
 
     return logl1_loss(prediction_ssi, target, mask, reduction_image_based)
 
 
+def recover_metric_depth(pred, gt):
+    if type(pred).__module__ == torch.__name__:
+        pred = pred.cpu().numpy()
+    if type(gt).__module__ == torch.__name__:
+        gt = gt.cpu().numpy()
+    gt = gt.squeeze()
+    pred = pred.squeeze()
+    mask = (gt > 1e-8) & (pred > 1e-8)
+
+    gt_mask = gt[mask]
+    pred_mask = pred[mask]
+    a, b = np.polyfit(pred_mask, gt_mask, deg=1)
+    pred_metric = a * pred + b
+    return pred_metric
+
+
 @dataclass
 class LossZoeCfg:
     weight: float = 1.0
     
-
+# https://github.com/aim-uofa/AdelaiDepth/blob/main/LeReS/Train/lib/models/PWN_planes.py
 @dataclass
 class LossZoeCfgWrapper:
     zoe: LossZoeCfg
@@ -110,15 +130,20 @@ class LossZoe(Loss[LossZoeCfg, LossZoeCfgWrapper]):
             gaussians: Gaussians,
             global_step: int,
         ) -> Float[Tensor, ""]:
-        near, far = 0.0, 100.0
-        zoe_depth = batch['zoe_depth'].squeeze(-1).squeeze(-1)
+        near, far = 0.0, 100
+        zoe_depth = batch["context"]['zoe_depth'].squeeze(-1).squeeze(-1)
         pred_depth = batch["context"]["est_depth"].squeeze(-1).squeeze(-1) # b v h w srf s -> b v h w
-        pred_depth = torch.clamp(pred_depth, near, far) # np.clip
+
+        mask = pred_depth[pred_depth>near] and pred_depth[pred_depth<far]
+        zoe_depth = zoe_depth[mask]
+        pred_depth = pred_depth[mask]
+
 
         # delta = pred_depth - zoe_depth
         # return self.cfg.weight * (delta**2).mean()
 
-        mask = torch.ones_like(pred_depth)
-        return self.cfg.weight * depth_loss(pred_depth, zoe_depth, mask)
-        
-    
+        zoe_depth_0, pred_depth_0 = pred_depth[:,0,:,:], zoe_depth[:,0,:,:]
+        zoe_depth_1, pred_depth_1 = pred_depth[:,1,:,:], zoe_depth[:,1,:,:]
+        mask_0, mask_1 = torch.ones_like(pred_depth_0), torch.ones_like(pred_depth_1)
+        loss =  depth_loss(mask_0, zoe_depth_0, mask_0) + depth_loss(mask_1, zoe_depth_1, mask_1)
+        return self.cfg.weight * loss

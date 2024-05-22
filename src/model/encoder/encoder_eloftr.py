@@ -101,10 +101,12 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         super().__init__(cfg)
         self.config = backbone_cfg
         self.return_cnn_features = True
+        self.use_zoe_loss = False
 
-        print("==> Load ZoeDepth model ")
-        repo = "isl-org/ZoeDepth"
-        self.zoe = torch.hub.load(repo, "ZoeD_N", pretrained=True).cuda()
+        if self.use_zoe_loss:
+            print("==> Load ZoeDepth model ")
+            repo = "isl-org/ZoeDepth"
+            self.zoe = torch.hub.load(repo, "ZoeD_N", pretrained=True).cuda()
 
         self.matcher = LoFTR(backbone_cfg)
         ckpt_path = cfg.eloftr_weights_path
@@ -314,8 +316,10 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         # raw_gaussians (b, v, 65536, 84)  1 * ((7 + 3 * self.d_sh) + 2) d_sh=(4+1)**2 4->sh_degree
         """
         batch["context"]["est_depth"] = rearrange(depths, "b v (h w) srf s -> b v h w srf s", h=h, w=w)
-        zoe_depths = get_zoe_depth(self.zoe, context["image"], vis=False).to(densities.device) # b v 1 h w        
-        batch["context"]['zoe_depth'] =  rearrange(zoe_depths, "b v (h w) srf s -> b v h w srf s", h=h, w=w)
+        
+        if self.use_zoe_loss:
+            zoe_depths = get_zoe_depth(self.zoe, context["image"], vis=False).to(densities.device) # b v 1 h w        
+            batch["context"]['zoe_depth'] =  rearrange(zoe_depths, "b v (h w) srf s -> b v h w srf s", h=h, w=w)
 
         # save depth result to compare
         vis_depth = False
