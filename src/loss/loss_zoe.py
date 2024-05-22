@@ -16,6 +16,7 @@ from .loss import Loss
 from src.visualization.vis_depth import viz_depth_tensor
 from PIL import Image
 import numpy as np
+from src.loss.PWN_planes import PWNPlanesLoss
 
 '''
 zoe depth Loss
@@ -130,13 +131,17 @@ class LossZoe(Loss[LossZoeCfg, LossZoeCfgWrapper]):
             gaussians: Gaussians,
             global_step: int,
         ) -> Float[Tensor, ""]:
+
+        use_vnl = False
         near, far = 0.0, 100
+        intri = batch["context"]["intrinsics"] # b v 3 3
         zoe_depth = batch["context"]['zoe_depth'].squeeze(-1).squeeze(-1)
         pred_depth = batch["context"]["est_depth"].squeeze(-1).squeeze(-1) # b v h w srf s -> b v h w
-
-        mask = pred_depth[pred_depth>near] and pred_depth[pred_depth<far]
-        zoe_depth = zoe_depth[mask]
-        pred_depth = pred_depth[mask]
+        # pred_depth = torch.clamp(pred_depth, near, far)
+        
+        mask = (pred_depth > near) & (pred_depth < far)
+        zoe_depth = zoe_depth * mask
+        pred_depth = pred_depth * mask
 
 
         # delta = pred_depth - zoe_depth
@@ -145,5 +150,16 @@ class LossZoe(Loss[LossZoeCfg, LossZoeCfgWrapper]):
         zoe_depth_0, pred_depth_0 = pred_depth[:,0,:,:], zoe_depth[:,0,:,:]
         zoe_depth_1, pred_depth_1 = pred_depth[:,1,:,:], zoe_depth[:,1,:,:]
         mask_0, mask_1 = torch.ones_like(pred_depth_0), torch.ones_like(pred_depth_1)
-        loss =  depth_loss(mask_0, zoe_depth_0, mask_0) + depth_loss(mask_1, zoe_depth_1, mask_1)
+        loss = (depth_loss(mask_0, zoe_depth_0, mask_0) + depth_loss(mask_1, zoe_depth_1, mask_1)) / 2.
+    
+        if use_vnl:
+            pred_depth_0, zoe_depth_0 = pred_depth[:,0,:,:].unsqueeze(1).cuda(), zoe_depth[:,0,:,:].unsqueeze(1).cuda() # b 1 h w
+            pred_depth_1, zoe_depth_1 = pred_depth[:,1,:,:].unsqueeze(1).cuda(), zoe_depth[:,1,:,:].unsqueeze(1).cuda()
+            mask_0, mask_1 = torch.ones_like(pred_depth_0), torch.ones_like(pred_depth_1)
+
+            vnl_loss = PWNPlanesLoss()
+            vnl = (vnl_loss(pred_depth_0, zoe_depth_0, mask_0, intri[:,0,:,:]) + \
+                vnl_loss(pred_depth_1, zoe_depth_1, mask_1, intri[:,1,:,:])) / 2.
+            loss +=vnl
+        
         return self.cfg.weight * loss

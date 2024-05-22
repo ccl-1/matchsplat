@@ -52,19 +52,28 @@ def run(cfg_dict: DictConfig):
     near = batch["context"]["near"].cuda()
     far = batch["context"]["far"].cuda()
 
+    print(intri.size())
+    print(intri)
+
+
     # ------------- test loss -------------------------------------
 
 
-    loss_mode = 'zoe'
-    # loss_mode = 'surface normal'
+    # loss_mode = 'zoe'
+    loss_mode = 'surface normal'
 
-    zoe_depth = torch.rand(2, 2, 256,256) *10
+    zoe_depth = torch.rand(2, 2, 256,256) *10 # b v h w
     pred_depth = torch.rand(2, 2, 256,256)*20
 
     if loss_mode == 'zoe':  # for zoe depth
         print("==> test zoe depth loss ")
+        near, far = 0.0, 100
         pred_depth_0, zoe_depth_0 = pred_depth[:,0,:,:].cuda(), zoe_depth[:,0,:,:].cuda()
         pred_depth_1, zoe_depth_1 = pred_depth[:,1,:,:].cuda(), zoe_depth[:,1,:,:].cuda()
+        mask = (pred_depth > near) & (pred_depth < far)
+        zoe_depth = zoe_depth * mask
+        pred_depth = pred_depth * mask
+
         mask_0, mask_1 = torch.ones_like(pred_depth_0), torch.ones_like(pred_depth_1)
         loss =  depth_loss(pred_depth_0, zoe_depth_0, mask_0) + depth_loss(pred_depth_1, zoe_depth_1, mask_1)
 
@@ -73,9 +82,8 @@ def run(cfg_dict: DictConfig):
         pred_depth_0, zoe_depth_0 = pred_depth[:,0,:,:].unsqueeze(1).cuda(), zoe_depth[:,0,:,:].unsqueeze(1).cuda()
         pred_depth_1, zoe_depth_1 = pred_depth[:,1,:,:].unsqueeze(1).cuda(), zoe_depth[:,1,:,:].unsqueeze(1).cuda()
         mask_0, mask_1 = torch.ones_like(pred_depth_0), torch.ones_like(pred_depth_1)
-        # mask_0, mask_1 = torch.zeros_like(pred_depth_0), torch.zeros_like(pred_depth_1)
 
-        vnl_loss = PWNPlanesLoss()
+        vnl_loss = PWNPlanesLoss() # [b 1 h w], [b 3 3]
         loss = vnl_loss(pred_depth_0, zoe_depth_0, mask_0, intri.squeeze(0)) + \
             vnl_loss(pred_depth_1, zoe_depth_1, mask_1, intri.squeeze(0))
     else:

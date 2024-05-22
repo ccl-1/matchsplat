@@ -240,7 +240,7 @@ class PWNPlanesLoss(nn.Module):
         Virtual normal loss.
         :param prediction: predicted depth map, [B,W,H,C]
         :param data: target label, ground truth depth, [B, W, H, C], padding region [padding_up, padding_down]
-        :param intrinsic:  [2,3,3]
+        :param intrinsic:  [B,3,3]
         :return:
         """
         loss  = self.get_loss(prediction,  target, mask, intrinsic)
