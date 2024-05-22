@@ -171,7 +171,7 @@ def huber_loss(pred: torch.Tensor, label: torch.Tensor, reduction: str='none'):
         return torch.nn.functional.huber_loss(pred, label, reduction=reduction) 
 
 def smoothness_loss(depth_map):
-    tv_loss = np.sum(np.abs(np.diff(depth_map, axis=0))) + np.sum(np.abs(np.diff(depth_map, axis=1)))
+    tv_loss = torch.sum(torch.abs(torch.diff(depth_map, dim=0))) + torch.sum(torch.abs(torch.diff(depth_map, dim=1)))
     return tv_loss
 
 def smoothness_loss2(depth, image):
@@ -209,11 +209,10 @@ class LossCorres(Loss[LossCorresCfg, LossCorresCfgWrapper]):
         gaussians: Gaussians,
         global_step: int,
     ) -> Float[Tensor, ""]:
-        depths = batch["context"]["rendered_depth"]
-        # near, far = 0.0, 100.0
-        # depths = batch["context"]["est_depth"].squeeze(-1).squeeze(-1) # b v h w srf s -> b v h w
-        # depths = torch.clamp(depths, near, far) # np.clip
-        # 深度图需要恢复 shift .. 
+        # depths = batch["context"]["rendered_depth"]
+        near, far = 0.0, 100.0
+        depths = batch["context"]["est_depth"].squeeze(-1).squeeze(-1) # b v h w srf s -> b v h w
+        depths = torch.clamp(depths, near, far) 
         mbids = batch["mbids"]
 
         b, v, h, w = depths.shape
@@ -326,7 +325,7 @@ class LossCorres(Loss[LossCorresCfg, LossCorresCfgWrapper]):
                 if global_step % 10 == 0:
                     save_points_ply(pts_3d_0.clone().detach().cpu().numpy(), f"outputs/tmp/triangulated_kpts0_batch{i}_step{global_step}.ply")
                     save_points_ply(pts_3d_1.clone().detach().cpu().numpy(), f"outputs/tmp/triangulated_kpts1_batch{i}_step{global_step}.ply")
-
+    
 
         # Devided by the number of all matched keypoints
         loss += self.cfg.weight_repro * (loss_repro / float(len(mkpts0)))

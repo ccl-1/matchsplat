@@ -132,7 +132,7 @@ class LossZoe(Loss[LossZoeCfg, LossZoeCfgWrapper]):
             global_step: int,
         ) -> Float[Tensor, ""]:
 
-        use_vnl = False
+        self.use_vnl = False
         near, far = 0.0, 100
         intri = batch["context"]["intrinsics"] # b v 3 3
         zoe_depth = batch["context"]['zoe_depth'].squeeze(-1).squeeze(-1)
@@ -152,7 +152,8 @@ class LossZoe(Loss[LossZoeCfg, LossZoeCfgWrapper]):
         mask_0, mask_1 = torch.ones_like(pred_depth_0), torch.ones_like(pred_depth_1)
         loss = (depth_loss(mask_0, zoe_depth_0, mask_0) + depth_loss(mask_1, zoe_depth_1, mask_1)) / 2.
     
-        if use_vnl:
+
+        if self.use_vnl:
             pred_depth_0, zoe_depth_0 = pred_depth[:,0,:,:].unsqueeze(1).cuda(), zoe_depth[:,0,:,:].unsqueeze(1).cuda() # b 1 h w
             pred_depth_1, zoe_depth_1 = pred_depth[:,1,:,:].unsqueeze(1).cuda(), zoe_depth[:,1,:,:].unsqueeze(1).cuda()
             mask_0, mask_1 = torch.ones_like(pred_depth_0), torch.ones_like(pred_depth_1)
