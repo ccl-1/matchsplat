@@ -71,6 +71,5 @@ trainer:
   gradient_clip_val: 0.5
   num_sanity_val_steps: 2
 
-# output_dir: outputs/fpn  #  save path of checkpoint
-output_dir: outputs/1_layer  #  save path of checkpoint
+output_dir: outputs/fpn  #  save path of checkpoint
 
