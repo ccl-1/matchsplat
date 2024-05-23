@@ -68,13 +68,10 @@ class LoFTR(nn.Module):
             })
             (feat_c0, feat_c1) = feats_c.split(data['bs'])
 
-            if wo_fpn_depth:
-                cnn_features = data['feats_x2'] # bvchw
-                cnn_features = rearrange(cnn_features, '(b v) c h w -> b v c h w', b=b, v=2)
-            else:
-                cnn_features_x2 = rearrange(data['feats_x2'], '(b v) c h w -> b v c h w', b=b, v=2)
-                cnn_features_x1 = rearrange(data['feats_x1'], '(b v) c h w -> b v c h w', b=b, v=2)
-                cnn_features = [cnn_features_x1, cnn_features_x2] # # torch.Size([2, 64, 112, 160]) [2, 128, 56, 80])
+            cnn_features_x2 = rearrange(data['feats_x2'], '(b v) c h w -> b v c h w', b=b, v=2) # 64,  d2
+            cnn_features_x1 = rearrange(data['feats_x1'], '(b v) c h w -> b v c h w', b=b, v=2) # 128, d4
+            cnn_features_c = rearrange(feats_c, '(b v) c h w -> b v c h w', b=b, v=2)           # 256, d8
+            cnn_features = [cnn_features_x1, cnn_features_x2, cnn_features_c] 
                 
         else:  # handle different input shapes
             ret_dict0, ret_dict1 = self.backbone(data['image0']), self.backbone(data['image1'])

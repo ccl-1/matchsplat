@@ -14,10 +14,7 @@ ENCODERS = {
 
 }
 
-# EncoderCfg = EncoderCostVolumeCfg
-EncoderCfg = EncoderELoFTRCfg
- # 注意这个地方地 dataclass 和配置文件直接挂钩， 每次换配置文件之前 这里一定要对应好 ... 
-
+EncoderCfg = EncoderELoFTRCfg | EncoderCostVolumeCfg
 
 def get_encoder(cfg: EncoderCfg, backbone_cfg =None) -> tuple[Encoder, Optional[EncoderVisualizer]]:
     encoder, visualizer = ENCODERS[cfg.name]

@@ -14,6 +14,10 @@ from pytorch_lightning.utilities import rank_zero_only
 from torch import Tensor, nn, optim
 import numpy as np
 import json
+import open3d as o3d
+from ..loss.loss_corres import save_points_ply
+
+from .types import Gaussians
 
 from ..dataset.data_module import get_data_shim
 from ..dataset.types import BatchedExample
@@ -112,6 +116,7 @@ class ModelWrapper(LightningModule):
         self.encoder_visualizer = encoder_visualizer
         self.decoder = decoder
         self.data_shim = get_data_shim(self.encoder)
+
         self.losses = nn.ModuleList(losses)
 
         for p in self.encoder.matcher.parameters():
@@ -135,14 +140,31 @@ class ModelWrapper(LightningModule):
         gaussians = self.encoder(
             batch["context"], self.global_step, False, scene_names=batch["scene"]
         )
+
+        # -----------------------  for test gs ply ------------------------
+        if False:
+            if isinstance(gaussians, list):
+                for id, gs in enumerate(gaussians):
+                    gs_i = gs.means[0].clone().detach().cpu().numpy()
+                    save_points_ply(gs_i,f"outputs/tmp/gs/iproj_world{id}.ply")
+                pcd1 = o3d.io.read_point_cloud(f"outputs/tmp/gs/iproj_world0.ply")
+                pcd2 = o3d.io.read_point_cloud(f"outputs/tmp/gs/iproj_world1.ply")
+                pcd3 = o3d.io.read_point_cloud(f"outputs/tmp/gs/iproj_world2.ply")
+
+                pcd1 = pcd1.paint_uniform_color([1, 0, 0])  #red
+                pcd2 = pcd2.paint_uniform_color([0, 1, 0])  
+                pcd3 = pcd3.paint_uniform_color([0, 0, 1])  
+
+                pcd_combined = pcd1 + pcd2 +pcd3
+                o3d.io.write_point_cloud(f"outputs/tmp/gs/iproj_world_combined.ply", pcd_combined)
+                input()
+
         if isinstance(gaussians, list):
             # downscale_factor = [2, 4, 8]  
             downscale_factor = [1, 2, 4]  
-
             assert len(gaussians) == len(downscale_factor)
             
             total_loss = 0
-            psnr_probabilistics = []
             target_gt_full = batch["target"]["image"].clone().detach() 
             for gaussian, downscale in zip(gaussians, downscale_factor):
                 h_, w_ = int(h / downscale), int(w / downscale)                
@@ -161,22 +183,45 @@ class ModelWrapper(LightningModule):
                 target_gt = rearrange(target_gt, "(b v) c h w -> b v c h w", b=b, v=v)
                 batch["target"]["image"] = target_gt
 
-                # Compute metrics.
-                psnr_probabilistic = compute_psnr(
-                    rearrange(target_gt, "b v c h w -> (b v) c h w"),
-                    rearrange(output.color, "b v c h w -> (b v) c h w"),
-                )
-                psnr_probabilistics.append(psnr_probabilistic.mean())
-
                 # Compute and log loss.
                 layer_loss = 0
-                for loss_fn in self.losses:
+                if len(self.losses)>2:
+                    self.losses = self.losses[:2]
+                for loss_fn in self.losses: 
                     loss = loss_fn.forward(output, batch, gaussian, self.global_step)
-                    self.log(f"loss/{loss_fn.name}", loss)
                     layer_loss = layer_loss + loss
                 total_loss += layer_loss
 
-            self.log("train/psnr_probabilistic", sum(psnr_probabilistics) / len(psnr_probabilistics))
+            # ------------------- merged fpn gaussians ----------------
+            fpn_means = torch.cat([gs.means  for gs in gaussians], dim=1)
+            fpn_covariances = torch.cat([gs.covariances  for gs in gaussians], dim=1)
+            fpn_harmonics = torch.cat([gs.harmonics  for gs in gaussians], dim=1)
+            fpn_opacities = torch.cat([gs.opacities  for gs in gaussians], dim=1)
+            fpn_gaussians = Gaussians(fpn_means, fpn_covariances, fpn_harmonics, fpn_opacities)
+
+            fpn_output = self.decoder.forward(
+                fpn_gaussians,
+                batch["target"]["extrinsics"],
+                batch["target"]["intrinsics"],
+                batch["target"]["near"],
+                batch["target"]["far"],
+                (h, w),
+                depth_mode=self.train_cfg.depth_mode,
+            )
+            batch["target"]["image"] = target_gt_full
+
+            # Compute metrics.
+            psnr_probabilistic = compute_psnr(
+                rearrange(target_gt_full, "b v c h w -> (b v) c h w"),
+                rearrange(fpn_output.color, "b v c h w -> (b v) c h w"),
+            )
+            self.log("train/psnr_probabilistic", psnr_probabilistic.mean())
+
+            # Compute and log loss.
+            for loss_fn in self.losses:
+                loss = loss_fn.forward(fpn_output, batch, fpn_gaussians, self.global_step)
+                self.log(f"loss/{loss_fn.name}", loss)
+                total_loss = total_loss + loss
             self.log("loss/total", total_loss)
             
             if (
@@ -369,7 +414,12 @@ class ModelWrapper(LightningModule):
         )
         # to ensure normally run the model, just use the d4 result for now
         if isinstance(gaussians_softmax, list):
-            gaussians_softmax = gaussians_softmax[1]
+            fpn_means = torch.cat([gs.means  for gs in gaussians_softmax], dim=1)
+            fpn_covariances = torch.cat([gs.covariances  for gs in gaussians_softmax], dim=1)
+            fpn_harmonics = torch.cat([gs.harmonics  for gs in gaussians_softmax], dim=1)
+            fpn_opacities = torch.cat([gs.opacities  for gs in gaussians_softmax], dim=1)
+            gaussians_softmax = Gaussians(fpn_means, fpn_covariances, fpn_harmonics, fpn_opacities)
+        
         output_softmax = self.decoder.forward(
             gaussians_softmax,
             batch["target"]["extrinsics"],
@@ -377,6 +427,7 @@ class ModelWrapper(LightningModule):
             batch["target"]["near"],
             batch["target"]["far"],
             (h, w),
+            depth_mode=self.train_cfg.depth_mode,
         )
         rgb_softmax = output_softmax.color[0]
 
@@ -391,6 +442,11 @@ class ModelWrapper(LightningModule):
             self.log(f"val/lpips_{tag}", lpips)
             ssim = compute_ssim(rgb_gt, rgb).mean()
             self.log(f"val/ssim_{tag}", ssim)
+
+            print (
+                f"psnr_{tag}: {psnr}, "
+                f"lpips_{tag}: {lpips}, "
+                f"ssim_{tag}: {ssim}, ")
 
         # Construct comparison image.
         comparison = hcat(
@@ -416,6 +472,25 @@ class ModelWrapper(LightningModule):
             [prep_image(add_border(projections))],
             step=self.global_step,
         )
+        if self.train_cfg.depth_mode == 'depth':
+            # Render colored depth map
+            # Color-map the result.
+            def depth_map(result): 
+                near = result[result > 0][:16_000_000].quantile(0.01).log()
+                far = result.view(-1)[:16_000_000].quantile(0.8).log()
+                result = result.log()
+
+                result = 1 - (result - near) / (far - near)
+                return apply_color_map_to_image(result, "turbo")
+
+            colored_depth = depth_map(output_softmax.depth[0])
+            vis_depth = add_label(hcat(*colored_depth), "Target depth")
+            self.logger.log_image(
+                "depth",
+                [prep_image(add_border(vis_depth))],
+                step=self.global_step,
+            )
+
 
         # Draw cameras.
         cameras = hcat(*render_cameras(batch, 256))
@@ -546,9 +621,13 @@ class ModelWrapper(LightningModule):
         # Render probabilistic estimate of scene.
         gaussians_prob = self.encoder(batch["context"], self.global_step, False)
         if isinstance(gaussians_prob, list):
-            gaussians_prob = gaussians_prob[1]
-        # gaussians_det = self.encoder(batch["context"], self.global_step, True)
+            fpn_means = torch.cat([gs.means  for gs in gaussians_prob], dim=1)
+            fpn_covariances = torch.cat([gs.covariances  for gs in gaussians_prob], dim=1)
+            fpn_harmonics = torch.cat([gs.harmonics  for gs in gaussians_prob], dim=1)
+            fpn_opacities = torch.cat([gs.opacities  for gs in gaussians_prob], dim=1)
+            gaussians_prob = Gaussians(fpn_means, fpn_covariances, fpn_harmonics, fpn_opacities)
 
+        # gaussians_det = self.encoder(batch["context"], self.global_step, True)
         t = torch.linspace(0, 1, num_frames, dtype=torch.float32, device=self.device)
         if smooth:
             t = (torch.cos(torch.pi * (t + 1)) + 1) / 2

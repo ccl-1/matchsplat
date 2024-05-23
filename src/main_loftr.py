@@ -43,6 +43,9 @@ def cyan(text: str) -> str:
     config_path="../config",
     config_name="main_1",
 )
+
+# python -m src.main_loftr +experiment=re10k
+
 def train(cfg_dict: DictConfig):
 
     
@@ -124,9 +127,7 @@ def train(cfg_dict: DictConfig):
 
     encoder, encoder_visualizer = get_encoder(cfg.model.encoder,  backbone_cfg =_default_cfg)
 
-    depth_ckpt_path = "checkpoints/depth_predictor.ckpt"
-    encoder.load_state_dict(torch.load(depth_ckpt_path), strict=False) # only load weight of depth_predictor
-
+    
     model_wrapper = ModelWrapper(
         cfg.optimizer,
         cfg.test,
@@ -143,6 +144,10 @@ def train(cfg_dict: DictConfig):
         step_tracker,
         global_rank=trainer.global_rank,
     )
+    encoder_ckpt_path = "outputs/1_layer/checkpoints/epoch_51-step_2000-v6.ckpt"
+    # encoder_ckpt_path = "checkpoints/re10k.ckpt"
+    model_wrapper.load_state_dict(torch.load(encoder_ckpt_path)['state_dict'], strict=False)
+
 
     if cfg.mode == "train":
         trainer.fit(model_wrapper, datamodule=data_module)

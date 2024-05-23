@@ -124,18 +124,18 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
             print("==> Load E-loFTR backbone checkpoint: %s" % ckpt_path)
             self.matcher.load_state_dict(torch.load(ckpt_path)['state_dict'], False)
             self.matcher = reparameter(self.matcher) # no reparameterization will lead to low performance
-            
-        self.conv1x1_128_64 =  nn.Sequential(nn.Conv2d(128, 64, 1), nn.Conv2d(64, 64, 1))
-        self.conv1x1_256_128 = nn.Sequential(nn.Conv2d(256, 128, 1), nn.Conv2d(128, 128,1))
-        self.conv_64 = nn.Sequential(nn.Conv2d(64, 64, 1), nn.Conv2d(64, 64, 1))
-        self.conv_128 = nn.Sequential(nn.Conv2d(128, 128, 1), nn.Conv2d(128, 128, 1))
-        self.conv_128_d8_trans = nn.Conv2d(128, 128, 1)
-        self.conv_128_d8_cnn = nn.Conv2d(128, 128, 1)
+             
+        self.cnn_64 = nn.Sequential(nn.Conv2d(64, 64, 1), nn.ReLU(), nn.Conv2d(64, 64, 3, 1, 1), nn.ReLU())
+        self.cnn_128 = nn.Sequential(nn.Conv2d(128, 128, 1), nn.ReLU(), nn.Conv2d(128, 128, 3, 1, 1), nn.ReLU())
+        self.cnn_256 = nn.Sequential(nn.Conv2d(256, 256, 1), nn.ReLU(), nn.Conv2d(256, 256, 3, 1, 1), nn.ReLU())
+
+        self.trans_64 = nn.Sequential(nn.Conv2d(64, 64, 1), nn.ReLU(), nn.Conv2d(64, 64, 3, 1, 1), nn.ReLU())
+        self.trans_128 = nn.Sequential(nn.Conv2d(128, 128, 1), nn.ReLU(), nn.Conv2d(128, 128, 3, 1, 1), nn.ReLU())
+        self.trans_256 = nn.Sequential(nn.Conv2d(256, 256, 1), nn.ReLU(), nn.Conv2d(256, 256, 3, 1, 1), nn.ReLU())
 
         # gaussians convertor
         self.gaussian_adapter = GaussianAdapter(cfg.gaussian_adapter)
 
-        self.use_d8_depth = True
         if cfg.wo_fpn_depth:
             self.depth_predictor = DepthPredictorMultiView(
                 feature_channels=cfg.d_feature,
@@ -155,12 +155,8 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
                 wo_cost_volume_refine=cfg.wo_cost_volume_refine,
             )  
         else:
-            if self.use_d8_depth:
-                self.d_feature = [64, 128, 128]
-                self.downscale_factor = [2, 4, 8]  
-            else:
-                self.d_feature = [64, 128]
-                self.downscale_factor = [2, 4]   
+            self.d_feature = [64, 128, 256]
+            self.downscale_factor = [2, 4, 8] 
             self.fpn_depth_predictor = nn.ModuleList([
                 DepthPredictorMultiView(
                     feature_channels=df,
@@ -191,47 +187,31 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         data = {'image0': img0_gray, 'image1': img_gray}
         return data
 
-    def get_trans_feature(self, x):
+    def get_trans_cnn_feature(self, x, y):
+        # trans
         b, v, _, _, _ = x[0].shape
         x = [rearrange(i, "b v c h w -> (b v) c h w", b=b, v=v) for i in x]
-        x_d2, x_d4 = x
-        x2 = self.conv1x1_128_64(x_d2) 
-        x4 = self.conv1x1_256_128(x_d4) 
-        x = [x2, x4]
+        x_d1, x_d2, x_d4 = x 
+        x2 = F.interpolate(x_d1, scale_factor=0.5, mode='bilinear', align_corners=False)
+        x2 = self.trans_64(x2)          # bv 64 d2
+        x4 = F.interpolate(x_d2, scale_factor=0.5, mode='bilinear', align_corners=False)
+        x4 = self.trans_128(x4)         # bv 128 d4
+        x8 = F.interpolate(x_d4, scale_factor=0.5, mode='bilinear', align_corners=False)
+        x8 = self.trans_256(x8)         # bv 256 d8
+        x = [x2, x4, x8]
         x = [rearrange(i, "(b v) c h w -> b v c h w", b=b, v=v) for i in x]
-        return x
-    
-    def get_cnn_feature(self, x):
-        if isinstance(x, list):
-            b, v, _, _, _ = x[0].shape
-            x = [rearrange(i, "b v c h w -> (b v) c h w", b=b, v=v) for i in x]
-            x_d2, x_d4 = x # orch.Size([2, 64, 112, 160]) [2, 128, 56, 80])
-            x2 = self.conv_64(x_d2) 
-            x4 = self.conv_128(x_d4) 
-            x = [x2, x4]
-            x = [rearrange(i, "(b v) c h w -> b v c h w", b=b, v=v) for i in x]
-        else:
-            b, v, _, _, _ = x.shape
-            x = rearrange(x, "b v c h w -> (b v) c h w", b=b, v=v) 
-            x = self.conv_128(x) 
-            x = rearrange(x, "(b v) c h w -> b v c h w", b=b, v=v) 
-        return x
 
-    def add_d8_feature(self, trans_features, cnn_features):
-        b, v, _, _, _ = trans_features[1].shape  
-        d8_trans = rearrange(trans_features[1], "b v c h w -> (b v) c h w", b=b, v=v)
-        d8_trans = F.interpolate(d8_trans, scale_factor=0.5, mode='bilinear', align_corners=False)
-        d8_trans = self.conv_128_d8_trans(d8_trans)
-        d8_trans = rearrange(d8_trans, "(b v) c h w -> b v c h w", b=b, v=v)
-
-        d8_cnn = rearrange(cnn_features[1], "b v c h w -> (b v) c h w", b=b, v=v)
-        d8_cnn = F.interpolate(d8_cnn, scale_factor=0.5, mode='bilinear', align_corners=False)
-        d8_cnn = self.conv_128_d8_cnn(d8_cnn)
-        d8_cnn = rearrange(d8_cnn, "(b v) c h w -> b v c h w", b=b, v=v)
+        # cnn
+        y = [rearrange(i, "b v c h w -> (b v) c h w", b=b, v=v) for i in y]
+        y_d2, y_d4, y_d8 = y 
+        y2 = self.cnn_64(y_d2) 
+        y4 = self.cnn_128(y_d4) 
+        y8 = self.cnn_256(y_d8) 
+        y = [y2, y4, y8]
+        y = [rearrange(i, "(b v) c h w -> b v c h w", b=b, v=v) for i in y]
         
-        trans_features.append(d8_trans)
-        cnn_features.append(d8_cnn)
-        return trans_features, cnn_features
+        return x, y
+
 
     def map_pdf_to_opacity(
             self,
@@ -286,26 +266,22 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         b, v, _, h, w = context["image"].shape      # 224, 320
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # depths = get_zoe_depth(self.zoe, context["image"], vis=False).to(densities.device) # b v 1 h w        
         for k in context:
             if context[k].device != device:
                 context[k] = context[k].to(device)
 
         data = self.data_process(context["image"])  # input size must be divides by 32
-        fpn_features, cnn_features = self.matcher(data, 
-                                                  self.return_cnn_features,
-                                                  self.cfg.wo_fpn_depth) 
-        
+        fpn_features, cnn_features = self.matcher(data, self.return_cnn_features, self.cfg.wo_fpn_depth)
+        trans_features, cnn_features = self.get_trans_cnn_feature(fpn_features, cnn_features)
+        # d2/d4/d8
+        # torch.Size([1, 2, 64, 128, 128]) torch.Size([1, 2, 128, 64, 64]) torch.Size([1, 2, 256, 32, 32])
+
         # Sample depths from the resulting features.
         extra_info = {}
         extra_info['images'] = rearrange(context["image"], "b v c h w -> (v b) c h w")
         extra_info["scene_names"] = scene_names
         gpp = self.cfg.gaussians_per_pixel
 
-        # trans_features are same with cnn_features 
-        trans_features = self.get_trans_feature(fpn_features) 
-        cnn_features = self.get_cnn_feature(cnn_features) 
-        
 
         if self.cfg.wo_fpn_depth: # single layer, [b,v,128,56,60]
             in_feats = trans_features[1] 
@@ -318,7 +294,7 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
                 gaussians_per_pixel=gpp,
                 deterministic=deterministic,
                 extra_info=extra_info,
-                cnn_features=cnn_features,
+                cnn_features=cnn_features[1],
                 wo_fpn_depth=self.cfg.wo_fpn_depth
             )
             gaussians = self.convert_fd_to_gaussians(h,w, context, depths, 
@@ -358,16 +334,10 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
                 ),
             )
     
-        else: # 2/3 layers
-            if self.use_d8_depth:
-                trans_features, cnn_features = self.add_d8_feature( trans_features, cnn_features)
-            
-            
-
+        else: # input d2/d4/d8, output d1/d2/d4   depth need constraint
             fpn_gaussians= []
             for in_feat, cnn_feat, depth_predictor, downscale_factor \
-                in zip(trans_features, cnn_features, \
-                       self.fpn_depth_predictor,self.downscale_factor):
+                in zip(trans_features, cnn_features, self.fpn_depth_predictor, self.downscale_factor):
                 depths, densities, raw_gaussians = depth_predictor(
                     in_feat,
                     context["intrinsics"],
@@ -380,10 +350,11 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
                     cnn_features=cnn_feat,
                     wo_fpn_depth=self.cfg.wo_fpn_depth)
                 b, v, _, h, w = context["image"].shape 
-                h, w = int(h / downscale_factor *2),  int(w / downscale_factor*2)
-                gaussians = self.convert_fd_to_gaussians(h,w, context, depths, 
-                    raw_gaussians, densities, global_step, device)
-
+                h, w = int(h / downscale_factor *2),  int(w / downscale_factor *2)
+                
+                # here depth can be fusioned.
+                gaussians = self.convert_fd_to_gaussians(h,w, context, depths, raw_gaussians, densities, global_step, device)
+            
                 # Dump visualizations if needed.
                 if visualization_dump is not None:
                     idx = 'P' + str(int(downscale_factor))

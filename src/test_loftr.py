@@ -59,6 +59,18 @@ def modify_ckpt(encoder, checkpoint_path):
     return ckpt_new
 
 
+
+def scaled_K(batch, downscale):
+    b, v, _, h, w = batch["context"]["image"].shape
+    h, w = int(h / downscale), int(w / downscale)
+    
+    # unnormalized camera intrinsic
+    intrinsics = batch["context"]["intrinsics"].clone().detach() 
+    intrinsics[:, :, 0, :] *= float(w)
+    intrinsics[:, :, 1, :] *= float(h)
+    return intrinsics
+
+
 @hydra.main(
     version_base=None,
     config_path="../config",
@@ -82,10 +94,17 @@ def run(cfg_dict: DictConfig):
     data_shim = get_data_shim(encoder)
     batch = data_shim(batch)
 
-    ckpt_path = "checkpoints/re10k.ckpt"
-    new_ckpt_path = "checkpoints/re10k_loftr.ckpt"
+    # itr1 = batch["target"]["intrinsics"][0][0] # torch.Size([1, 4, 3, 3]) b v 3 3
+    # itr2 = batch["context"]["intrinsics"][0][0] # torch.Size([1, 4, 3, 3]) b v 3 3
+
+    # print(itr1)
+    # print(itr2)
+
+
+    # ckpt_path = "checkpoints/re10k.ckpt"
+    # new_ckpt_path = "checkpoints/re10k_loftr.ckpt"
     depth_ckpt_path = "checkpoints/depth_predictor.ckpt"
-    print("==> Load depth_predictor checkpoint: %s" % depth_ckpt_path)
+    # print("==> Load depth_predictor checkpoint: %s" % depth_ckpt_path)
     encoder.load_state_dict(torch.load(depth_ckpt_path), strict=False) # only load weight of depth_predictor
 
     # ckpt_new = modify_ckpt(encoder, ckpt_path)
@@ -95,30 +114,38 @@ def run(cfg_dict: DictConfig):
 
     visualization_dump = {}
     gaussians = encoder(batch["context"], 0, False, visualization_dump=visualization_dump, scene_names=batch["scene"])
-    decoder = get_decoder(cfg.model.decoder, cfg.dataset)
-    decoder = decoder.to(device)
-    print(visualization_dump.keys())
+    
+    # decoder = get_decoder(cfg.model.decoder, cfg.dataset)
+    # decoder = decoder.to(device)
+    # print(visualization_dump.keys())
+
 
     # save context views
-    save_image(batch["context"]["image"][0, 0], f"outputs/out/input_0.png")
-    save_image(batch["context"]["image"][0, 1], f"outputs/out/input_1.png")
+    # save_image(batch["context"]["image"][0, 0], f"outputs/out/input_0.png")
+    # save_image(batch["context"]["image"][0, 1], f"outputs/out/input_1.png")
 
     # save encoder depth map
-    depth_vis = ((visualization_dump["depth"].squeeze(-1).squeeze(-1)).cpu().detach())
-    for v_idx in range(depth_vis.shape[1]):
-        vis_depth = viz_depth_tensor(1.0 / depth_vis[0, v_idx], return_numpy=True)  # inverse depth
-        Image.fromarray(vis_depth).save(f"outputs/out/depth_{v_idx}.png")
+    # depth_vis = ((visualization_dump['P2']["depth"].squeeze(-1).squeeze(-1)).cpu().detach())
+    # for v_idx in range(depth_vis.shape[1]):
+    #     vis_depth = viz_depth_tensor(1.0 / depth_vis[0, v_idx], return_numpy=True)  # inverse depth
+    #     Image.fromarray(vis_depth).save(f"outputs/out/depth_P2_{v_idx}.png")
     
     # Render depth.
+    # ds =2
+    # batch["context"]["intrinsics"] = scaled_K(batch, ds)
     *_, h, w = batch["context"]["image"].shape
+    # h, w = int(h/ds), int(w / ds)
+
+"""
     rendered = decoder.forward( gaussians,
         batch["context"]["extrinsics"], batch["context"]["intrinsics"],
-        batch["context"]["near"],batch["context"]["far"], (h, w), "depth",)
+        batch["context"]["near"],batch["context"]["far"], (h, w), "depth",) # here depth mode = depth not null
     
     result = rendered.depth.cpu().detach()
+    print("i get depth")
     for v_idx in range(result.shape[1]):
         vis_depth = viz_depth_tensor(1.0 / result[0, v_idx], return_numpy=True)  # inverse depth
-        Image.fromarray(vis_depth).save(f"./outputs/out/depth_{v_idx}_gs.png")
-
+        Image.fromarray(vis_depth).save(f"./outputs/out/depth_P2_{v_idx}_gs.png")
+"""
 run()
 
