@@ -144,7 +144,7 @@ def train(cfg_dict: DictConfig):
         step_tracker,
         global_rank=trainer.global_rank,
     )
-    encoder_ckpt_path = "outputs/1_layer/checkpoints/epoch_51-step_2000-v6.ckpt"
+    encoder_ckpt_path = "outputs/epoch_51-step_2000-v6.ckpt"
     # encoder_ckpt_path = "checkpoints/re10k.ckpt"
     model_wrapper.load_state_dict(torch.load(encoder_ckpt_path)['state_dict'], strict=False)
 

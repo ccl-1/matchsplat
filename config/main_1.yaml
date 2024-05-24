@@ -3,7 +3,7 @@ defaults:
   - optional dataset/view_sampler_dataset_specific_config: ${dataset/view_sampler}_${dataset}
   - model/encoder: eloftr
   - model/decoder: splatting_cuda
-  - loss: [mse]
+  - loss: [mse, lpips]
   # - loss: [mse, lpips, depth]
 
 wandb:
@@ -54,14 +54,14 @@ train:
   depth_mode: null
   # depth_mode: depth
   extended_visualization: false
-  print_log_every_n_steps: 1
+  print_log_every_n_steps: 10
 
 test:
   output_path: outputs/test_fpn
   compute_scores: false
   eval_time_skip_steps: 0
-  save_image: true
-  save_video: true
+  save_image: false
+  save_video: false
 
 seed: 111123
 

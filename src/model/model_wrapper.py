@@ -137,9 +137,7 @@ class ModelWrapper(LightningModule):
         b, v, _, h, w = batch["target"]["image"].shape # 1, 4, 3, 224, 320
 
         # Run the model.
-        gaussians = self.encoder(
-            batch["context"], self.global_step, False, scene_names=batch["scene"]
-        )
+        gaussians = self.encoder(batch, self.global_step, False, scene_names=batch["scene"])
 
         # -----------------------  for test gs ply ------------------------
         if False:
@@ -301,10 +299,16 @@ class ModelWrapper(LightningModule):
         # Render Gaussians.
         with self.benchmarker.time("encoder"):
             gaussians = self.encoder(
-                batch["context"],
+                batch, #["context"],
                 self.global_step,
                 deterministic=False,
             )
+            if isinstance(gaussians, list):
+                fpn_means = torch.cat([gs.means  for gs in gaussians], dim=1)
+                fpn_covariances = torch.cat([gs.covariances  for gs in gaussians], dim=1)
+                fpn_harmonics = torch.cat([gs.harmonics  for gs in gaussians], dim=1)
+                fpn_opacities = torch.cat([gs.opacities  for gs in gaussians], dim=1)
+                gaussians = Gaussians(fpn_means, fpn_covariances, fpn_harmonics, fpn_opacities)
         with self.benchmarker.time("decoder", num_calls=v):
             output = self.decoder.forward(
                 gaussians,
@@ -344,20 +348,20 @@ class ModelWrapper(LightningModule):
 
             if f"psnr" not in self.test_step_outputs:
                 self.test_step_outputs[f"psnr"] = []
-            if f"ssim" not in self.test_step_outputs:
-                self.test_step_outputs[f"ssim"] = []
-            if f"lpips" not in self.test_step_outputs:
-                self.test_step_outputs[f"lpips"] = []
+            # if f"ssim" not in self.test_step_outputs:
+            #     self.test_step_outputs[f"ssim"] = []
+            # if f"lpips" not in self.test_step_outputs:
+            #     self.test_step_outputs[f"lpips"] = []
 
             self.test_step_outputs[f"psnr"].append(
                 compute_psnr(rgb_gt, rgb).mean().item()
             )
-            self.test_step_outputs[f"ssim"].append(
-                compute_ssim(rgb_gt, rgb).mean().item()
-            )
-            self.test_step_outputs[f"lpips"].append(
-                compute_lpips(rgb_gt, rgb).mean().item()
-            )
+            # self.test_step_outputs[f"ssim"].append(
+            #     compute_ssim(rgb_gt, rgb).mean().item()
+            # )
+            # self.test_step_outputs[f"lpips"].append(
+            #     compute_lpips(rgb_gt, rgb).mean().item()
+            # )
 
     def on_test_end(self) -> None:
         name = get_cfg()["wandb"]["name"]
@@ -408,7 +412,7 @@ class ModelWrapper(LightningModule):
         b, _, _, h, w = batch["target"]["image"].shape
         assert b == 1
         gaussians_softmax = self.encoder(
-            batch["context"],
+            batch, #["context"],
             self.global_step,
             deterministic=False,
         )
@@ -619,7 +623,8 @@ class ModelWrapper(LightningModule):
         loop_reverse: bool = True,
     ) -> None:
         # Render probabilistic estimate of scene.
-        gaussians_prob = self.encoder(batch["context"], self.global_step, False)
+        gaussians_prob = self.encoder(batch, #["context"], 
+                                      self.global_step, False)
         if isinstance(gaussians_prob, list):
             fpn_means = torch.cat([gs.means  for gs in gaussians_prob], dim=1)
             fpn_covariances = torch.cat([gs.covariances  for gs in gaussians_prob], dim=1)

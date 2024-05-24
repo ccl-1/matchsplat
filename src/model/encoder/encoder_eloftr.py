@@ -133,6 +133,16 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         self.trans_128 = nn.Sequential(nn.Conv2d(128, 128, 1), nn.ReLU(), nn.Conv2d(128, 128, 3, 1, 1), nn.ReLU())
         self.trans_256 = nn.Sequential(nn.Conv2d(256, 256, 1), nn.ReLU(), nn.Conv2d(256, 256, 3, 1, 1), nn.ReLU())
 
+        self.translation_regressor = nn.Sequential(
+            nn.Linear(128*64*64 * 2, 128 ),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, 3),
+        )
+
         # gaussians convertor
         self.gaussian_adapter = GaussianAdapter(cfg.gaussian_adapter)
 
@@ -212,6 +222,11 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         
         return x, y
 
+    def get_scale(self, x):
+        b, v, _, _, _ = x.shape
+        x = rearrange(x, "b v c h w -> b (v c h w)", b=b, v=v) 
+        scale = self.translation_regressor(x)
+        return scale
 
     def map_pdf_to_opacity(
             self,
@@ -256,13 +271,13 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
 
     def forward(
         self,
-        context: dict,
+        batch: dict,
         global_step: int,
         deterministic: bool = False,
         visualization_dump: Optional[dict] = None,
         scene_names: Optional[list] = None,
         ) :
-        
+        context = batch["context"]
         b, v, _, h, w = context["image"].shape      # 224, 320
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -276,12 +291,17 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         # d2/d4/d8
         # torch.Size([1, 2, 64, 128, 128]) torch.Size([1, 2, 128, 64, 64]) torch.Size([1, 2, 256, 32, 32])
 
+        batch["mkpts0"], batch["mkpts1"], batch["mconf"], batch['mbids'] = \
+            data["mkpts0_f"], data["mkpts1_f"], data["mconf"], data['m_bids']
+        
+        pred_scales = self.get_scale(trans_features[1]) # b,3
+        batch['pred_scale'] = pred_scales
+
         # Sample depths from the resulting features.
         extra_info = {}
         extra_info['images'] = rearrange(context["image"], "b v c h w -> (v b) c h w")
         extra_info["scene_names"] = scene_names
         gpp = self.cfg.gaussians_per_pixel
-
 
         if self.cfg.wo_fpn_depth: # single layer, [b,v,128,56,60]
             in_feats = trans_features[1] 
