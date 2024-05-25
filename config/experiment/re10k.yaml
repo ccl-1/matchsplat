@@ -38,8 +38,8 @@ model:
     depth_unet_feat_dim: 32
     depth_unet_attn_res: [16]
     depth_unet_channel_mult: [1,1,1,1,1]
-    wo_fpn_depth: false  
-    # wo_fpn_depth: true  
+    # wo_fpn_depth: false  
+    wo_fpn_depth: true  
 
 
 # lpips loss

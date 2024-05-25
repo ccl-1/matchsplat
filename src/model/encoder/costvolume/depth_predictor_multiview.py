@@ -34,7 +34,7 @@ def warp_with_pose_depth_candidates(
         grid = coords_grid(
             b, h, w, homogeneous=True, device=depth.device
         )  # [B, 3, H, W]
-        # back project to 3D and transform viewpoint
+        # back project to 3D and transform viewpoint 乘以逆外参将其转到世界坐标系的原点
         points = torch.inverse(intrinsics).bmm(grid.view(b, 3, -1))  # [B, 3, H*W]
         points = torch.bmm(pose[:, :3, :3], points).unsqueeze(2).repeat(
             1, 1, d, 1
@@ -42,7 +42,8 @@ def warp_with_pose_depth_candidates(
             b, 1, d, h * w
         )  # [B, 3, D, H*W]
         points = points + pose[:, :3, -1:].unsqueeze(-1)  # [B, 3, D, H*W]
-        # reproject to 2D image plane
+        
+        # reproject to 2D image plane [X, Y, Z]-> [X/Z, Y/Z, 1]
         points = torch.bmm(intrinsics, points.view(b, 3, -1)).view(
             b, 3, d, h * w
         )  # [B, 3, D, H*W]
@@ -78,10 +79,10 @@ def prepare_feat_proj_data_lists(
 
     feat_lists = []
     pose_curr_lists = []
-    init_view_order = list(range(v))
+    init_view_order = list(range(v)) # [0,1]
     feat_lists.append(rearrange(features, "b v ... -> (v b) ..."))  # (vxb c h w)
     for idx in range(1, v):
-        cur_view_order = init_view_order[idx:] + init_view_order[:idx]
+        cur_view_order = init_view_order[idx:] + init_view_order[:idx] #[1, 0]
         cur_feat = features[:, cur_view_order]
         feat_lists.append(rearrange(cur_feat, "b v ... -> (v b) ..."))  # (vxb c h w)
 
@@ -305,7 +306,7 @@ class DepthPredictorMultiView(nn.Module):
                     pose_curr,
                     1.0 / disp_candi_curr.repeat([1, 1, *feat10.shape[-2:]]),
                     warp_padding_mode="zeros",
-                )  # [B, C, D, H, W]
+                )  # [B, C, D, H, W], D warped features, sample D depth ... 
                 # calculate similarity
                 raw_correlation_in = (feat01.unsqueeze(2) * feat01_warped).sum(
                     1

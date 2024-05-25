@@ -315,8 +315,11 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
                 deterministic=deterministic,
                 extra_info=extra_info,
                 cnn_features=cnn_features[1],
-                wo_fpn_depth=self.cfg.wo_fpn_depth
+                wo_fpn_depth=self.cfg.wo_fpn_depth,
+                batch=batch,
             )
+            batch["context"]["est_depth"] = rearrange(depths, "b v (h w) srf s -> b v h w srf s", h=h, w=w)
+
             gaussians = self.convert_fd_to_gaussians(h,w, context, depths, 
                     raw_gaussians, densities, global_step, device)
             

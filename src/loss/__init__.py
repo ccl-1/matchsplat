@@ -11,7 +11,6 @@ LOSSES = {
     LossDepthCfgWrapper: LossDepth,
     LossLpipsCfgWrapper: LossLpips,
     LossMseCfgWrapper: LossMse,
-
     
     LossCorresCfgWrapper: LossCorres,
     LossScaleCfgWrapper: LossScale,

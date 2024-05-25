@@ -113,7 +113,8 @@ def run(cfg_dict: DictConfig):
     # torch.save(encoder.state_dict(), new_ckpt_path)
 
     visualization_dump = {}
-    gaussians = encoder(batch["context"], 0, False, visualization_dump=visualization_dump, scene_names=batch["scene"])
+    gaussians = encoder(batch, #["context"], 
+                        0, False, visualization_dump=visualization_dump, scene_names=batch["scene"])
     
     # decoder = get_decoder(cfg.model.decoder, cfg.dataset)
     # decoder = decoder.to(device)

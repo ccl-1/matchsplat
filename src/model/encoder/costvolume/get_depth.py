@@ -2,10 +2,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
-
+import numpy as np
 from ..backbone.unimatch.geometry import coords_grid
 from .ldm_unet.unet import UNetModel
+import matplotlib.pyplot as plt
+import plotly.graph_objs as go
+from mpl_toolkits.mplot3d import Axes3D
 
+# from src.loss.loss_corres import triangulate_point_from_multiple_views_linear_torch, pc_transform
+from ....geometry.projection import pc_transform, save_points_ply, \
+    triangulate_point_from_multiple_views_linear_torch
 
 def warp_with_pose_depth_candidates(
     feature1,
@@ -122,7 +128,59 @@ def prepare_feat_proj_data_lists(
     depth_candi_curr = repeat(depth_candi_curr, "vb d -> vb d () ()")  # [vxb, d, 1, 1]
     return feat_lists, intr_curr, pose_curr_lists, depth_candi_curr
 
+def estimate_depth_from_mkpt(features, intrinsics, extrinsics,batch, save_ply=True):
+    b, v, c, h, w = features.shape
+    mbids = batch["mbids"]
+    depth_mkpt_list = []
+    for i in range(b):
+        b_mask = mbids == i
+        mkpts0 = batch["mkpts0"][b_mask]
+        mkpts1 = batch["mkpts1"][b_mask]
+        mconf = batch["mconf"][b_mask]
 
+        extr0 = extrinsics[i, 0].clone().detach()
+        extr1 = extrinsics[i, 1].clone().detach()
+        intr0 = intrinsics[i, 0].clone().detach()
+        intr1 = intrinsics[i, 1].clone().detach()
+
+        intr0[0, :] *= w
+        intr0[1, :] *= h
+        intr1[0, :] *= w
+        intr1[1, :] *= h
+
+        proj_mat0 = torch.matmul(intr0, extr0.inverse()[:3])
+        proj_mat1 = torch.matmul(intr1, extr1.inverse()[:3])
+        proj_mats = torch.stack([proj_mat0, proj_mat1], dim=0)
+
+        pts_3d = []
+        for k in range(len(mkpts0)):
+            pt3d = triangulate_point_from_multiple_views_linear_torch(
+                proj_mats, torch.stack([mkpts0[k], mkpts1[k]]), torch.stack([mconf[k], mconf[k]]))
+            pts_3d.append(pt3d)
+        pts_3d_world = torch.stack(pts_3d)
+
+        # Transform from world to the coordinate 0 and 1
+        pts_3d_0 = pc_transform(pts_3d_world, extr0.inverse())
+        pts_3d_1 = pc_transform(pts_3d_world, extr1.inverse())
+
+        mask = (pts_3d_0[:, 2] > 0) & (pts_3d_0[:, 2] <100) & (pts_3d_1[:, 2] > 0) & (pts_3d_1[:, 2] <100) 
+        pts_3d_0, pts_3d_1 = pts_3d_0[mask], pts_3d_1[mask]
+        mkpts0, mkpts1 = mkpts0[mask], mkpts1[mask]
+        
+        if save_ply:
+            save_points_ply(pts_3d_0.clone().detach().cpu().numpy(), f"outputs/tmp/tri0_b{i}.ply")
+            save_points_ply(pts_3d_1.clone().detach().cpu().numpy(), f"outputs/tmp/tri1_b{i}.ply")
+        
+        # [K,3] -> [V, K, 3] -> [B V K 3]
+        pts_2d_0 = torch.cat([mkpts0, pts_3d_0[:, 2].unsqueeze(1)], dim=1)
+        pts_2d_1 = torch.cat([mkpts1, pts_3d_1[:, 2].unsqueeze(1)], dim=1)
+        pts_2d = torch.stack([pts_2d_0, pts_2d_1], dim=0)
+        depth_mkpt_list.append(pts_2d)
+        print("---------------- mkpts range of depth:--------------")
+        print(pts_3d_0[:, 2].min(), pts_3d_0[:, 2].max())
+    depth_mkpt = torch.stack(depth_mkpt_list, dim=0) # [B V K 3]
+    torch.set_printoptions(sci_mode=False)
+    return depth_mkpt
 
 class DepthPredictorMultiView(nn.Module):
     """IMPORTANT: this model is in (v b), NOT (b v), due to some historical issues.
@@ -286,11 +344,16 @@ class DepthPredictorMultiView(nn.Module):
         deterministic=True,
         extra_info=None,
         cnn_features=None,
-        wo_fpn_depth=False
+        wo_fpn_depth=False,
+        batch=None,
     ):
         """IMPORTANT: this model is in (v b), NOT (b v), due to some historical issues.
         keep this in mind when performing any operation related to the view dim"""
 
+        depth_mkpt = estimate_depth_from_mkpt(features, intrinsics, extrinsics, batch, True)
+        print("--------------- gt near far")
+        print(near, far)
+        
         # format the input
         b, v, c, h, w = features.shape
         feat_comb_lists, intr_curr, pose_curr_lists, disp_candi_curr = (
@@ -319,7 +382,7 @@ class DepthPredictorMultiView(nn.Module):
                     feat10,
                     intr_curr,
                     pose_curr,
-                    1.0 / disp_candi_curr.repeat([1, 1, *feat10.shape[-2:]]),
+                    1.0 / disp_candi_curr.repeat([1, 1, *feat10.shape[-2:]]), # [vb, d, h, w]
                     warp_padding_mode="zeros",
                 )  # [B, C, D, H, W]
                 # calculate similarity
@@ -344,6 +407,7 @@ class DepthPredictorMultiView(nn.Module):
         coarse_disps = (disp_candi_curr * pdf).sum(dim=1, keepdim=True)  # (vb, 1, h, w)
         pdf_max = torch.max(pdf, dim=1, keepdim=True)[0]  # argmax
 
+
         if wo_fpn_depth:
             pdf_max = F.interpolate(pdf_max, scale_factor=self.upscale_factor)
             fullres_disps = F.interpolate( # recover to full resolution
@@ -351,6 +415,59 @@ class DepthPredictorMultiView(nn.Module):
                 scale_factor=self.upscale_factor,
                 mode="bilinear",
                 align_corners=True)
+            
+            # TODO Fusion depth_mkpt & fullres_disps
+            def fusion_mkpt_costvolum(depth_mkpt, fullres_disps, alpha=None):
+                """
+                :param depth_mkpt:    (b, v, k, 3)
+                :param fullres_disps: (vb, 1, h, w)
+                :param alpha: None | float
+                :return: (vb, 1, h, w)
+                """
+                b, v, _, _ = depth_mkpt.size() # b v k 3                
+                fullres_disps = rearrange(fullres_disps, "(v b) ... -> b v ...", b=b, v=v) 
+                fullres_disps = fullres_disps.squeeze(2) # b v h w 
+
+                mk_x, mk_y,  = depth_mkpt[:, :, :, 0].long(),  depth_mkpt[:, :, :, 1].long(), 
+                mk_z = 1.0 / depth_mkpt[:, :, :, 2]
+                # mk_z =  depth_mkpt[:, :, :, 2]
+
+                
+                if False: # just for testing disp distribution 
+                    Xmk = mk_x[0,0].cpu().detach().numpy()
+                    Ymk = mk_y[0,0].cpu().detach().numpy()
+                    Zmk = mk_z[0,0].cpu().detach().numpy()
+                    xx, yy = np.arange(256), np.arange(256)
+                    xx, yy = np.meshgrid(xx, yy)
+                    zz = fullres_disps[0,0].cpu().detach().numpy()
+                                            
+                    fig = plt.figure()
+                    ax = fig.add_subplot(111, projection='3d')
+                    ax.scatter(Xmk, Ymk, Zmk, c='r',label='match')
+                    ax.scatter(xx, yy, zz, c='b',label='costvolume')
+                    ax.set_xlabel('X Label')
+                    ax.set_ylabel('Y Label')
+                    ax.set_zlabel('Z Label')
+                    ax.view_init(elev=30, azim=45)
+                    plt.legend()
+                    plt.savefig('outputs/tmp/disp_mk_cost_v0.jpg')
+                    # plt.show()
+
+                for i in range(b):
+                    for vi in range(v):
+                        index = (mk_y[i, vi], mk_x[i,vi])
+                        if alpha == None:
+                            fullres_disps[i, vi].index_put_(index, mk_z[i, vi])
+                        else:
+                            cost_depth = fullres_disps[i, vi, mk_y[i, vi], mk_x[i, vi]]
+                            weight_depth = alpha * mk_z[i, vi] + (1 - alpha) * cost_depth
+                            fullres_disps[i, vi].index_put_(index, weight_depth)
+                fullres_disps = rearrange(fullres_disps, "b v ... -> (v b) 1 ...", b=b, v=v) 
+                return fullres_disps             
+            
+            fullres_disps = fusion_mkpt_costvolum(depth_mkpt, fullres_disps)
+            # fullres_disps = fusion_mkpt_costvolum(depth_mkpt, fullres_disps, alpha=0.5)
+
             # depth refinement
             proj_feat_in_fullres = self.upsampler(torch.cat((feat01, cnn_features), dim=1)) # [2, 256, 112, 160]
             proj_feature = self.proj_feature(proj_feat_in_fullres) 
@@ -418,5 +535,6 @@ class DepthPredictorMultiView(nn.Module):
                 v=v,
                 srf=1,
             )
+
 
         return depths, densities, raw_gaussians

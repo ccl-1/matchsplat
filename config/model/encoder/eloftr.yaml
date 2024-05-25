@@ -37,8 +37,8 @@ wo_depth_refine: false         # Table 3: base
 wo_cost_volume: false          # Table 3: w/o cost volume
 wo_backbone_cross_attn: false  # Table 3: w/o cross-view attention
 wo_cost_volume_refine: false   # Table 3: w/o U-Net
-# wo_fpn_depth: true           # w/o depth Fpn 
-wo_fpn_depth: false           # w/o depth Fpn 
+wo_fpn_depth: true           # w/o depth Fpn 
+# wo_fpn_depth: false           # w/o depth Fpn 
 
 
 

@@ -2,14 +2,10 @@ from dataclasses import dataclass
 
 import torch
 import numpy as np
-from einops import reduce
 from jaxtyping import Float, Union
 from torch import Tensor
 import torch.utils
 
-from ..geometry.projection import sample_image_grid
-from ..geometry.projection import get_world_rays
-from einops.einops import rearrange
 import open3d as o3d
 
 from ..dataset.types import BatchedExample
@@ -20,36 +16,11 @@ from .loss import Loss
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 import matplotlib.cm as cm
-from plyfile import PlyData, PlyElement
 from torchvision.utils import save_image
 from PIL import Image
+from src.geometry.projection import triangulate_point_from_multiple_views_linear_torch, save_points_ply
+from src.visualization.vis_depth import viz_depth_tensor
 
-
-def save_points_ply(points, path):
-    vertex = np.array([(points[i][0], points[i][1], points[i][2]) 
-                        for i in range(points.shape[0])], 
-                        dtype=[('x', 'f4'), ('y', 'f4'), ('z', 'f4')])
-    
-    vertex_element = PlyElement.describe(vertex, 'vertex')
-    plydata = PlyData([vertex_element])
-    plydata.write(path)
-
-def viz_depth_tensor(disp, return_numpy=False, colormap='plasma'):
-    # visualize inverse depth
-    assert isinstance(disp, torch.Tensor)
-
-    disp = disp.numpy()
-    vmax = np.percentile(disp, 95)
-    normalizer = mpl.colors.Normalize(vmin=disp.min(), vmax=vmax)
-    mapper = cm.ScalarMappable(norm=normalizer, cmap=colormap)
-    colormapped_im = (mapper.to_rgba(disp)[:, :, :3] * 255).astype(np.uint8)  # [H, W, 3]
-
-    if return_numpy:
-        return colormapped_im
-
-    viz = torch.from_numpy(colormapped_im).permute(2, 0, 1)  # [3, H, W]
-
-    return viz
 
 def iproj_full_img(depth, intr):
     fx, fy, cx, cy = intr[0, 0], intr[1, 1], intr[0, 2], intr[1, 2]
@@ -139,34 +110,6 @@ def projective_transform(
         return x1, X0
     return x1
 
-def triangulate_point_from_multiple_views_linear_torch(proj_matricies, points, confidences=None):
-    """Similar as triangulate_point_from_multiple_views_linear() but for PyTorch.
-    For more information see its documentation.
-    Args:
-        proj_matricies torch tensor of shape (N, 3, 4): sequence of projection matricies (3x4)
-        points torch tensor of of shape (N, 2): sequence of points' coordinates
-        confidences None or torch tensor of shape (N,): confidences of points [0.0, 1.0].
-                                                        If None, all confidences are supposed to be 1.0
-    Returns:
-        point_3d numpy torch tensor of shape (3,): triangulated point
-    """
-    assert len(proj_matricies) == len(points)
-
-    n_views = len(proj_matricies)
-
-    if confidences is None:
-        confidences = torch.ones(n_views, dtype=torch.float32, device=points.device)
-
-    A = proj_matricies[:, 2:3].expand(n_views, 2, 4) * points.view(n_views, 2, 1)
-    A -= proj_matricies[:, :2]
-    A *= confidences.view(-1, 1, 1)
-
-    u, s, vh = torch.svd(A.view(-1, 4))
-
-    point_3d_homo = -vh[:, 3]
-    point_3d = from_homogeneous(point_3d_homo.unsqueeze(0))[0]
-    return point_3d
-
 def huber_loss(pred: torch.Tensor, label: torch.Tensor, reduction: str='none'):
         return torch.nn.functional.huber_loss(pred, label, reduction=reduction) 
 
@@ -201,6 +144,7 @@ class LossCorresCfg:
 class LossCorresCfgWrapper:
     corres: LossCorresCfg
 
+# TODO: CAN't run on fpn mode for now
 class LossCorres(Loss[LossCorresCfg, LossCorresCfgWrapper]):
     def forward(
         self,

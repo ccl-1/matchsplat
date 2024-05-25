@@ -4,6 +4,9 @@ import torch
 from einops import einsum, rearrange, reduce, repeat
 from jaxtyping import Bool, Float, Int64
 from torch import Tensor
+from jaxtyping import Float, Union
+import numpy as np
+from plyfile import PlyData, PlyElement
 
 
 def homogenize_points(
@@ -245,3 +248,56 @@ def get_fov(intrinsics: Float[Tensor, "batch 3 3"]) -> Float[Tensor, "batch 2"]:
     fov_x = (left * right).sum(dim=-1).acos()
     fov_y = (top * bottom).sum(dim=-1).acos()
     return torch.stack((fov_x, fov_y), dim=-1)
+
+
+def from_homogeneous(points: Union[torch.Tensor, np.ndarray]):
+    """Remove the homogeneous dimension of N-dimensional points.
+    Args:
+        points: torch.Tensor or numpy.ndarray with size (..., N+1).
+    Returns:
+        A torch.Tensor or numpy ndarray with size (..., N).
+    """
+    return points[..., :-1] / (points[..., -1:] + 1e-6)
+
+def pc_transform(pts3d_i: Float[Tensor, "N 3"], Tij: Float[Tensor, "4 4"])-> Float[Tensor, "N 3"]:
+    Tij = Tij.transpose(-1, -2)
+    pts3d_i = pts3d_i @ Tij[:3, :3]
+    pts3d_i = pts3d_i  + Tij[:3, -1:].transpose(0,1).repeat(pts3d_i.size()[0],1)
+    return pts3d_i
+
+def triangulate_point_from_multiple_views_linear_torch(proj_matricies, points, confidences=None):
+    """Similar as triangulate_point_from_multiple_views_linear() but for PyTorch.
+    For more information see its documentation.
+    Args:
+        proj_matricies torch tensor of shape (N, 3, 4): sequence of projection matricies (3x4)
+        points torch tensor of of shape (N, 2): sequence of points' coordinates
+        confidences None or torch tensor of shape (N,): confidences of points [0.0, 1.0].
+                                                        If None, all confidences are supposed to be 1.0
+    Returns:
+        point_3d numpy torch tensor of shape (3,): triangulated point
+    """
+    assert len(proj_matricies) == len(points)
+
+    n_views = len(proj_matricies)
+
+    if confidences is None:
+        confidences = torch.ones(n_views, dtype=torch.float32, device=points.device)
+
+    A = proj_matricies[:, 2:3].expand(n_views, 2, 4) * points.view(n_views, 2, 1)
+    A -= proj_matricies[:, :2]
+    A *= confidences.view(-1, 1, 1)
+
+    u, s, vh = torch.svd(A.view(-1, 4))
+
+    point_3d_homo = -vh[:, 3]
+    point_3d = from_homogeneous(point_3d_homo.unsqueeze(0))[0]
+    return point_3d
+
+def save_points_ply(points, path):
+    vertex = np.array([(points[i][0], points[i][1], points[i][2]) 
+                        for i in range(points.shape[0])], 
+                        dtype=[('x', 'f4'), ('y', 'f4'), ('z', 'f4')])
+    
+    vertex_element = PlyElement.describe(vertex, 'vertex')
+    plydata = PlyData([vertex_element])
+    plydata.write(path)
