@@ -62,6 +62,13 @@ dataset:
   baseline_scale_bounds: false
   make_baseline_1: false
 
+  view_sampler:
+  # initial_min_distance_between_context_views: 25
+  #   initial_max_distance_between_context_views: 45
+    initial_min_distance_between_context_views: 35
+    initial_max_distance_between_context_views: 85
+
+
 test:
   eval_time_skip_steps: 5
   compute_scores: true
