@@ -77,30 +77,35 @@ def warp_with_pose_depth_candidates(
     return warped_feature
 
 
-def get_depth_guided_candi(near, far, far_mk, num_samples, sigma=0.8):
+def get_depth_guided_candi(near, far, far_mk, num_samples, depth_guided_sample_flag, sigma=0.8):
     mk_depth_candi = []
     max_depth_mk = rearrange(1.0 / far_mk.cpu().detach(), "b v -> (v b) 1")
     max_depth_mk = rearrange(far_mk.cpu().detach(), "b v -> (v b) 1")
     max_depth_gt = rearrange(far.cpu().detach(), "b v -> (v b) 1")
     min_depth_gt = rearrange(near.cpu().detach(), "b v -> (v b) 1")
-    
+    depth_guided_sample_flag = rearrange(depth_guided_sample_flag.cpu().detach(), "b v -> (v b) 1")
+
     for j in range(max_depth_mk.size()[0]):
-        mean = max_depth_mk[j]
-        scale = mean / np.exp(0.5 * sigma**2)  
-        x = np.linspace(int(min_depth_gt[j]), int(max_depth_gt[j]), \
-                        int(max_depth_gt[j]) - int(min_depth_gt[j]))
-        pdf = lognorm.pdf(x, sigma, scale=scale)
-        cdf = np.cumsum(pdf)
-        cdf = cdf / cdf[-1]  
-        uniform_samples = np.random.uniform(0, 1, num_samples)
-        sample = np.interp(uniform_samples, cdf, x)
-        sample = torch.tensor(np.sort(sample, axis=0))
+        flag = torch.eq(depth_guided_sample_flag[j], torch.tensor(0)) 
+        if  flag:
+            sample =  torch.linspace(0.0, 1.0, num_samples)* (int(max_depth_gt[j]) - int(min_depth_gt[j]))
+        else:
+            mean = max_depth_mk[j]
+            scale = mean / np.exp(0.5 * sigma**2)  
+            x = np.linspace(int(min_depth_gt[j]), int(max_depth_gt[j]), \
+                            int(max_depth_gt[j]) - int(min_depth_gt[j]))
+            pdf = lognorm.pdf(x, sigma, scale=scale)
+            cdf = np.cumsum(pdf)
+            cdf = cdf / cdf[-1]  
+            uniform_samples = np.random.uniform(0, 1, num_samples)
+            sample = np.interp(uniform_samples, cdf, x)
+            sample = torch.tensor(np.sort(sample, axis=0)) # torch.Size([128])
         mk_depth_candi.append(sample)
     mk_depth_candi = torch.stack(mk_depth_candi, 0)
     return mk_depth_candi
 
 def prepare_feat_proj_data_lists(
-    features, intrinsics, extrinsics, near, far, num_samples, near_mk, far_mk, depth_guided_sample
+    features, intrinsics, extrinsics, near, far, num_samples, near_mk, far_mk, depth_guided_sample, depth_guided_sample_flag
 ):
     # prepare features
     b, v, _, h, w = features.shape
@@ -141,7 +146,7 @@ def prepare_feat_proj_data_lists(
     intr_curr = rearrange(intr_curr, "b v ... -> (v b) ...", b=b, v=v)  # [vxb 3 3]
     
     if depth_guided_sample:
-        mk_depth_candi = get_depth_guided_candi(near, far, far_mk, num_samples)
+        mk_depth_candi = get_depth_guided_candi(near, far, far_mk, num_samples, depth_guided_sample_flag)
         mk_depth_candi = (1.0 / mk_depth_candi).type_as(features) # depth -> disp
         depth_candi_curr = repeat(mk_depth_candi, "vb d -> vb d () ()")  # [vxb, d, 1, 1]
     else:
@@ -158,12 +163,13 @@ def prepare_feat_proj_data_lists(
 
 
 def estimate_depth_from_mkpt(features, intrinsics, extrinsics, batch, 
-                             save_ply=False, min_th=0.0, th_max=500.0):
+                             save_ply=False, th_min=0.0, th_max=500.0):
     b, v, c, h, w = features.shape
     mbids = batch["mbids"]
     depth_mkpt_list = []
     near_mks, far_mks =[], []
-    
+
+    depth_guided_sample_flag = []
     for i in range(b):
         b_mask = mbids == i
         mkpts0 = batch["mkpts0"][b_mask]
@@ -208,8 +214,8 @@ def estimate_depth_from_mkpt(features, intrinsics, extrinsics, batch,
         plt.savefig(f"outputs/tmp/tt.png")
         """
         
-        mask = (pts_3d_0[:, 2] > min_th) & (pts_3d_0[:, 2] < th_max) & \
-            (pts_3d_1[:, 2] > min_th) & (pts_3d_1[:, 2] < th_max) 
+        mask = (pts_3d_0[:, 2] > th_min) & (pts_3d_0[:, 2] < th_max) & \
+            (pts_3d_1[:, 2] > th_min) & (pts_3d_1[:, 2] < th_max) 
         pts_3d_0, pts_3d_1 = pts_3d_0[mask], pts_3d_1[mask]
         mkpts0, mkpts1 = mkpts0[mask], mkpts1[mask]
         
@@ -222,15 +228,23 @@ def estimate_depth_from_mkpt(features, intrinsics, extrinsics, batch,
         pts_2d_1 = torch.cat([mkpts1, pts_3d_1[:, 2].unsqueeze(1)], dim=1)
         pts_2d = torch.stack([pts_2d_0, pts_2d_1], dim=0) # [v k 3]
         depth_mkpt_list.append(pts_2d)
-
-        # Get a rough range of depth
-        near_mk, _ = torch.min(pts_2d[:, :, 2], dim=1) # [v]
-        far_mk, _  = torch.max(pts_2d[:, :, 2], dim=1)
-        near_mks.append(near_mk.unsqueeze(0))
-        far_mks.append(far_mk.unsqueeze(0))
+        
+        flag = torch.Tensor([0, 0])
+        if pts_2d.size()[1] > 0:
+            flag = torch.Tensor([1, 1])
+            # Get a rough range of depth
+            near_mk, _ = torch.min(pts_2d[:, :, 2], dim=1) # [v]
+            far_mk, _  = torch.max(pts_2d[:, :, 2], dim=1)
+            near_mks.append(near_mk.unsqueeze(0))
+            far_mks.append(far_mk.unsqueeze(0))
+        else:
+            near_mks.append(torch.Tensor([[0.0, 0.0]]))
+            far_mks.append(torch.Tensor([[500.0, 500.0]]))
+        depth_guided_sample_flag.append(flag.unsqueeze(0))
     near_mks = torch.cat(near_mks, dim=0) # [B V]
-    far_mks = torch.cat(far_mks, dim=0) # [B V]
-    return depth_mkpt_list, near_mks, far_mks
+    far_mks = torch.cat(far_mks, dim=0)   # [B V]
+    depth_guided_sample_flag = torch.cat(depth_guided_sample_flag, dim=0)
+    return depth_mkpt_list, near_mks, far_mks, depth_guided_sample_flag
 
 def fusion_mkpt_costvolum(b, depth_mkpt, fullres_disps, alpha=None):
     """
@@ -449,7 +463,7 @@ class DepthPredictorMultiView(nn.Module):
         keep this in mind when performing any operation related to the view dim"""
 
         # depth_mkpt, near_mk, far_mk = estimate_depth_from_mkpt(features, intrinsics, extrinsics, batch, save_ply=True)
-        depth_mkpt, near_mk, far_mk = estimate_depth_from_mkpt(features, intrinsics, extrinsics, batch)
+        depth_mkpt, near_mk, far_mk, depth_guided_sample_flag = estimate_depth_from_mkpt(features, intrinsics, extrinsics, batch)
 
         # format the input
         b, v, c, h, w = features.shape
@@ -464,6 +478,7 @@ class DepthPredictorMultiView(nn.Module):
                 near_mk=near_mk, 
                 far_mk=far_mk,
                 depth_guided_sample=True,
+                depth_guided_sample_flag = depth_guided_sample_flag
             )
         )
         if cnn_features is not None:

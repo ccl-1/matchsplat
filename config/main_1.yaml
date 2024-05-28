@@ -51,8 +51,8 @@ checkpointing:
   pretrained_model: null
 
 train:
-  depth_mode: null
-  # depth_mode: depth
+  # depth_mode: null
+  depth_mode: depth
   extended_visualization: false
   print_log_every_n_steps: 10
 
