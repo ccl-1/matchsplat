@@ -44,7 +44,6 @@ optimizer:
   cosine_lr: true
 
 checkpointing:
-  # load: 'checkpoints/depth_predictor.ckpt'
   load: 'checkpoints/re10k.ckpt'
   every_n_train_steps: 1000  # 5000
   save_top_k: -1

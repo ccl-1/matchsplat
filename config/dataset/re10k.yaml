@@ -3,6 +3,7 @@ defaults:
 
 name: re10k
 roots: [datasets/re10k]
+# roots: [/usr/stud/chj/storage/user/chj/datasets/re10k_subset]
 make_baseline_1: true
 augment: true
 
@@ -11,7 +12,6 @@ augment: true
 # image_shape: [160, 320]
 # image_shape: [224, 320]
 image_shape: [256, 256]
-
 background_color: [0.0, 0.0, 0.0]
 cameras_are_circular: false
 
@@ -19,8 +19,8 @@ baseline_epsilon: 1e-3
 max_fov: 100.0
 
 skip_bad_shape: true
-near: -1.
-far: -1.
+near: 1.
+far: 100.
 baseline_scale_bounds: true
 shuffle_val: true
 test_len: -1

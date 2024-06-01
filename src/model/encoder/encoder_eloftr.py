@@ -291,8 +291,13 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         # d2/d4/d8
         # torch.Size([1, 2, 64, 128, 128]) torch.Size([1, 2, 128, 64, 64]) torch.Size([1, 2, 256, 32, 32])
 
+
+        conf_mask = data['mconf'] >= 0.5
         batch["mkpts0"], batch["mkpts1"], batch["mconf"], batch['mbids'] = \
-            data["mkpts0_f"], data["mkpts1_f"], data["mconf"], data['m_bids']
+            data['mkpts0_f'][conf_mask], data['mkpts1_f'][conf_mask], data['mconf'][conf_mask], data['m_bids'][conf_mask]
+
+        # batch["mkpts0"], batch["mkpts1"], batch["mconf"], batch['mbids'] = \
+        #     data["mkpts0_f"], data["mkpts1_f"], data["mconf"], data['m_bids']
         
         pred_scales = self.get_scale(trans_features[1]) # b,3
         batch['pred_scale'] = pred_scales

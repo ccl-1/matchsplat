@@ -1,12 +1,14 @@
+from __future__ import annotations
+
 from math import prod
 
 import torch
-from einops import einsum, rearrange, reduce, repeat
-from jaxtyping import Bool, Float, Int64
-from torch import Tensor
-from jaxtyping import Float, Union
 import numpy as np
+from einops import einsum, rearrange, reduce, repeat
+from jaxtyping import Bool, Float, Int64, Union
+from torch import Tensor
 from plyfile import PlyData, PlyElement
+import math
 
 
 def homogenize_points(
@@ -259,6 +261,22 @@ def from_homogeneous(points: Union[torch.Tensor, np.ndarray]):
     """
     return points[..., :-1] / (points[..., -1:] + 1e-6)
 
+def to_homogeneous(points: Union[torch.Tensor, np.ndarray]):
+    """Convert N-dimensional points to homogeneous coordinates.
+    Args:
+        points: torch.Tensor or numpy.ndarray with size (..., N).
+    Returns:
+        A torch.Tensor or numpy.ndarray with size (..., N+1).
+    """
+    if isinstance(points, torch.Tensor):
+        pad = points.new_ones(points.shape[:-1]+(1,))
+        return torch.cat([points, pad], dim=-1)
+    elif isinstance(points, np.ndarray):
+        pad = np.ones((points.shape[:-1]+(1,)), dtype=points.dtype)
+        return np.concatenate([points, pad], axis=-1)
+    else:
+        raise ValueError
+
 def pc_transform(pts3d_i: Float[Tensor, "N 3"], Tij: Float[Tensor, "4 4"])-> Float[Tensor, "N 3"]:
     Tij = Tij.transpose(-1, -2)
     pts3d_i = pts3d_i @ Tij[:3, :3]
@@ -293,6 +311,14 @@ def triangulate_point_from_multiple_views_linear_torch(proj_matricies, points, c
     point_3d = from_homogeneous(point_3d_homo.unsqueeze(0))[0]
     return point_3d
 
+def iproj_full_img_(depth: Tensor, intr: Tensor, extr: Tensor):
+    ht, wd = depth.shape[-2:]
+    depth = depth.reshape(1, -1) 
+    xy_ray, _ = sample_image_grid(((ht, wd)), depth.device)
+    xy_ray = xy_ray.reshape(1, -1, 2)
+    origins, directions = get_world_rays(xy_ray, extr, intr)
+    return origins + directions * depth[..., None]
+
 def save_points_ply(points, path):
     vertex = np.array([(points[i][0], points[i][1], points[i][2]) 
                         for i in range(points.shape[0])], 
@@ -301,3 +327,15 @@ def save_points_ply(points, path):
     vertex_element = PlyElement.describe(vertex, 'vertex')
     plydata = PlyData([vertex_element])
     plydata.write(path)
+
+def save_color_points_ply(points, colors, path):
+    # colors in 0 - 255
+    vertex = np.array([(points[i][0], points[i][1], points[i][2], colors[i][0], colors[i][1], colors[i][2]) 
+                        for i in range(points.shape[0])], 
+                        dtype=[('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
+                        ('red', 'u1'), ('green', 'u1'), ('blue', 'u1')])
+    
+    vertex_element = PlyElement.describe(vertex, 'vertex')
+    plydata = PlyData([vertex_element])
+    plydata.write(path)
+    

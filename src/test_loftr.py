@@ -6,6 +6,9 @@ import torch
 from PIL import Image
 from einops import einsum, rearrange, repeat
 from scipy.spatial.transform import Rotation as R
+import matplotlib.pyplot as plt
+import numpy as np
+import math
 
 
 # Configure beartype and jaxtyping.
@@ -27,7 +30,10 @@ with install_import_hook(
     from src.model.encoder.encoder_eloftr import EncoderELoFTR, reparameter
     from src.model.decoder import get_decoder
     from src.visualization.vis_depth import viz_depth_tensor
-    from src.geometry.projection import homogenize_points, project
+    from src.geometry.projection import (homogenize_points, project, 
+                                         sample_image_grid, get_world_rays,
+                                         calculate_distance_to_image_plane)
+
 
 
 
@@ -86,6 +92,7 @@ def run(cfg_dict: DictConfig):
     data_module = DataModule(cfg.dataset, cfg.data_loader, StepTracker(), global_rank=0)
     dataset = iter(data_module.train_dataloader())
     batch = next(dataset, 0)
+    print ("context:", batch["scene"])
     
     # load model
     encoder = EncoderELoFTR(cfg=cfg.model.encoder, backbone_cfg =_default_cfg )
@@ -94,23 +101,12 @@ def run(cfg_dict: DictConfig):
     data_shim = get_data_shim(encoder)
     batch = data_shim(batch)
 
-    # itr1 = batch["target"]["intrinsics"][0][0] # torch.Size([1, 4, 3, 3]) b v 3 3
-    # itr2 = batch["context"]["intrinsics"][0][0] # torch.Size([1, 4, 3, 3]) b v 3 3
-
-    # print(itr1)
-    # print(itr2)
-
+    # intr = batch["context"]["intrinsics"][0][0].unsqueeze(0)
+    # extr = batch["context"]["extrinsics"][0][0].unsqueeze(0)
 
     # ckpt_path = "checkpoints/re10k.ckpt"
-    # new_ckpt_path = "checkpoints/re10k_loftr.ckpt"
-    depth_ckpt_path = "checkpoints/depth_predictor.ckpt"
-    # print("==> Load depth_predictor checkpoint: %s" % depth_ckpt_path)
+    depth_ckpt_path = "checkpoints/wo_fpn.ckpt"
     encoder.load_state_dict(torch.load(depth_ckpt_path), strict=False) # only load weight of depth_predictor
-
-    # ckpt_new = modify_ckpt(encoder, ckpt_path)
-    # torch.save(ckpt_new, depth_ckpt_path)
-    # encoder.load_state_dict(ckpt_new, strict=False) 
-    # torch.save(encoder.state_dict(), new_ckpt_path)
 
     visualization_dump = {}
     gaussians = encoder(batch, #["context"], 
@@ -119,7 +115,6 @@ def run(cfg_dict: DictConfig):
     # decoder = get_decoder(cfg.model.decoder, cfg.dataset)
     # decoder = decoder.to(device)
     # print(visualization_dump.keys())
-
 
     # save context views
     # save_image(batch["context"]["image"][0, 0], f"outputs/out/input_0.png")
@@ -134,7 +129,7 @@ def run(cfg_dict: DictConfig):
     # Render depth.
     # ds =2
     # batch["context"]["intrinsics"] = scaled_K(batch, ds)
-    *_, h, w = batch["context"]["image"].shape
+    # *_, h, w = batch["context"]["image"].shape
     # h, w = int(h/ds), int(w / ds)
 
 """
