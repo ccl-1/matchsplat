@@ -3,13 +3,16 @@
 defaults:
   - override /dataset: re10k
   - override /model/encoder: eloftr
-  # - override /loss: [mse, lpips, zoe]
-  - override /loss: [mse, lpips, corres]
+  - override /loss: [mse, lpips]
+  # - override /loss: [mse, lpips, corres]
   # - override /loss: [mse, lpips, depth, scale, corres]
 
 wandb:
   name: re10k
   tags: [re10k, 256x256]
+
+mode: train
+# mode: test
 
 data_loader:
   train:
@@ -40,8 +43,8 @@ loss:
     apply_after_step: 0
     weight: 0.05
   corres:
-    weight_repro: 0.25
-    weight_depth: 0.25
+    weight_repro: 0.05
+    weight_depth: 0.05
     use_corres_depth: false
     use_corres_repro: true
 
@@ -55,10 +58,10 @@ dataset:
   make_baseline_1: false
 
   view_sampler:
-    initial_min_distance_between_context_views: 25 
-    initial_max_distance_between_context_views: 45
-    # initial_min_distance_between_context_views: 35 
-    # initial_max_distance_between_context_views: 85 
+    # initial_min_distance_between_context_views: 25 
+    # initial_max_distance_between_context_views: 45
+    initial_min_distance_between_context_views: 35 
+    initial_max_distance_between_context_views: 85 
 
 
 train:

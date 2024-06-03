@@ -3,7 +3,9 @@ defaults:
   - optional dataset/view_sampler_dataset_specific_config: ${dataset/view_sampler}_${dataset}
   - model/encoder: eloftr
   - model/decoder: splatting_cuda
-  - loss: [mse, lpips, depth, zoe]
+  - loss: [mse, lpips]
+  # - loss: [mse, lpips, depth, zoe]
+
 
 wandb:
   project: mvsplat
@@ -25,7 +27,7 @@ data_loader:
     num_workers: 10
     persistent_workers: true
     batch_size: 1
-    seed: 123456
+    seed: 1234
   test:
     num_workers: 4
     persistent_workers: false

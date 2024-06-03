@@ -62,7 +62,8 @@ def run(cfg_dict: DictConfig):
     decoder = decoder#.cuda().eval()
     data_shim = get_data_shim(encoder)
     batch = data_shim(batch)
-    
+    print ("context:", batch["scene"])
+
     print ("context:", batch["context"]["image"].shape)
     print ("target:", batch["target"]["image"].shape)
 
