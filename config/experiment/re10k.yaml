@@ -3,7 +3,7 @@
 defaults:
   - override /dataset: re10k
   - override /model/encoder: eloftr
-  - override /loss: [mse, lpips,point]
+  - override /loss: [mse, lpips]
   # - override /loss: [mse, lpips, scale, point] 
   # - override /loss: [mse, lpips, depth, scale, corres]
 
@@ -33,7 +33,7 @@ model:
     depth_unet_feat_dim: 32
     depth_unet_attn_res: [16]
     depth_unet_channel_mult: [1,1,1,1,1]
-    est_pose: 'w8-point' # mlp, w8-point, 8-point
+    est_pose: '8-point' # mlp, w8-point, 8-point
     use_fpn: false
     # use_scale: ''
     use_scale: 'gt' # 'mlp'

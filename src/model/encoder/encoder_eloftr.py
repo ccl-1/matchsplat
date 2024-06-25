@@ -410,7 +410,7 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         pred_scales = self.get_scale(trans_features_list[1]) # b,1
         batch['pred_scale'] = pred_scales
    
-        # conf 训练动态变化，所以不能直接用来过滤， conf_mask 过滤会导致最终没有点用， depth 出现 nan ...  
+        # conf 训练动态变化，所以不能直接用来过滤， conf_mask 过滤会导致最终没有点用， render depth 出现 nan ...  
         batch["mkpts0"], batch["mkpts1"], batch["mconf"], batch['mbids'] = \
             data["mkpts0_f"], data["mkpts1_f"], data["mconf"], data['m_bids']
 
