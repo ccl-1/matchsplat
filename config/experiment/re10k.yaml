@@ -3,8 +3,8 @@
 defaults:
   - override /dataset: re10k
   - override /model/encoder: eloftr
-  - override /loss: [mse, lpips]
-  # - override /loss: [mse, lpips, corres]
+  - override /loss: [mse, lpips,point]
+  # - override /loss: [mse, lpips, scale, point] 
   # - override /loss: [mse, lpips, depth, scale, corres]
 
 wandb:
@@ -19,13 +19,13 @@ data_loader:
     batch_size: 1 # 14
 
 trainer:
-  max_steps: 2000 # 300_001
+  max_steps: 4000 # 300_001
 # output_dir: outputs/fpn # checkpoint save path
 
 # ----- Additional params for default best model customization
 model:
   encoder:
-    num_depth_candidates: 128
+    num_depth_candidates: 128 #32
     costvolume_unet_feat_dim: 128
     costvolume_unet_channel_mult: [1,1,1]
     costvolume_unet_attn_res: [4]
@@ -33,20 +33,26 @@ model:
     depth_unet_feat_dim: 32
     depth_unet_attn_res: [16]
     depth_unet_channel_mult: [1,1,1,1,1]
-    # wo_fpn_depth: false  
-    wo_fpn_depth: true  
+    est_pose: 'w8-point' # mlp, w8-point, 8-point
+    use_fpn: false
+    # use_scale: ''
+    use_scale: 'gt' # 'mlp'
 
+train:
+  depth_mode: depth
+  est_pose: '8-point' # mlp
+  use_scale: 'gt' # 'mlp'
+
+
+test:
+  eval_time_skip_steps: 5
+  compute_scores: true
 
 # lpips loss
 loss:
   lpips:
     apply_after_step: 0
     weight: 0.05
-  corres:
-    weight_repro: 0.05
-    weight_depth: 0.05
-    use_corres_depth: false
-    use_corres_repro: true
 
 dataset: 
   image_shape: [256, 256]
@@ -62,11 +68,3 @@ dataset:
     # initial_max_distance_between_context_views: 45
     initial_min_distance_between_context_views: 35 
     initial_max_distance_between_context_views: 85 
-
-
-train:
-  depth_mode: depth
-
-test:
-  eval_time_skip_steps: 5
-  compute_scores: true

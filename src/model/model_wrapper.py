@@ -67,6 +67,8 @@ class TrainCfg:
     depth_mode: DepthRenderingMode | None
     extended_visualization: bool
     print_log_every_n_steps: int
+    est_pose: str | None
+    use_scale: str | None
 
 
 @runtime_checkable
@@ -130,6 +132,9 @@ class ModelWrapper(LightningModule):
 
         self.writer = SummaryWriter()
 
+        self.use_scale = self.train_cfg.use_scale
+        self.est_pose =  self.train_cfg.est_pose
+
 
     def training_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)
@@ -141,16 +146,15 @@ class ModelWrapper(LightningModule):
             batch, self.global_step, False, scene_names=batch["scene"]
         )
         
-        # est_pose = True
-        est_pose = False
-        if est_pose:
-            target_extrinsics_est = pose_estimation_multi_view(batch, self.encoder.matcher)
-
+        if self.est_pose == '8-point':
+            target_extrinsics_est = pose_estimation_multi_view(batch, self.encoder.matcher, self.use_scale)
+        if self.est_pose == 'mlp':
+            pass
 
         output = self.decoder.forward(
             gaussians,
             # batch["target"]["extrinsics"],
-            batch["target"]["extrinsics"] if not est_pose else target_extrinsics_est,
+            batch["target"]["extrinsics"] if not self.est_pose else target_extrinsics_est,
             batch["target"]["intrinsics"],
             batch["target"]["near"],
             batch["target"]["far"],
@@ -159,17 +163,17 @@ class ModelWrapper(LightningModule):
         )
         target_gt = batch["target"]["image"]
 
-        output_context = self.decoder.forward(
-            gaussians,
-            batch["context"]["extrinsics"],
-            batch["context"]["intrinsics"],
-            batch["context"]["near"],
-            batch["context"]["far"],
-            (h, w),
-            depth_mode=self.train_cfg.depth_mode,
-        )
-        batch["context"]["rendered_img"] = output_context.color
-        batch["context"]["rendered_depth"] = output_context.depth
+        # output_context = self.decoder.forward(
+        #     gaussians,
+        #     batch["context"]["extrinsics"],
+        #     batch["context"]["intrinsics"],
+        #     batch["context"]["near"],
+        #     batch["context"]["far"],
+        #     (h, w),
+        #     depth_mode=self.train_cfg.depth_mode,
+        # )
+        # batch["context"]["rendered_img"] = output_context.color
+        # batch["context"]["rendered_depth"] = output_context.depth
          
         # Compute metrics.
         psnr_probabilistic = compute_psnr(
@@ -179,11 +183,13 @@ class ModelWrapper(LightningModule):
         self.log("train/psnr_probabilistic", psnr_probabilistic.mean())
         self.writer.add_scalar("train/psnr_probabilistic", psnr_probabilistic.mean().item(), self.global_step)
 
-        # Write pose estimation error
-        self.writer.add_scalar("train/rot_err_abs", batch["rot_err_abs"].item(), self.global_step)
-        self.writer.add_scalar("train/trans_err_abs", batch["trans_err_abs"].item(), self.global_step)
-        self.writer.add_scalar("train/rot_err_rel", batch["rot_err_rel"].item(), self.global_step)
-        self.writer.add_scalar("train/trans_err_rel", batch["trans_err_rel"].item(), self.global_step)
+        # TODO POSE-MLP ERROR VIS
+        if self.est_pose == '8-point':
+            # Write pose estimation error
+            self.writer.add_scalar("train/rot_err_abs", batch["rot_err_abs"].item(), self.global_step)
+            self.writer.add_scalar("train/trans_err_abs", batch["trans_err_abs"].item(), self.global_step)
+            self.writer.add_scalar("train/rot_err_rel", batch["rot_err_rel"].item(), self.global_step)
+            self.writer.add_scalar("train/trans_err_rel", batch["trans_err_rel"].item(), self.global_step)
         
 
         # Compute and log loss.
@@ -225,6 +231,9 @@ class ModelWrapper(LightningModule):
         b, v, _, h, w = batch["target"]["image"].shape
         assert b == 1
 
+        if self.est_pose == '8-point':
+            target_extrinsics_est = pose_estimation_multi_view(batch, self.encoder.matcher, self.use_scale)
+
         # Render Gaussians.
         with self.benchmarker.time("encoder"):
             gaussians = self.encoder(
@@ -235,7 +244,8 @@ class ModelWrapper(LightningModule):
         with self.benchmarker.time("decoder", num_calls=v):
             output = self.decoder.forward(
                 gaussians,
-                batch["target"]["extrinsics"],
+                # batch["target"]["extrinsics"],
+                batch["target"]["extrinsics"] if not self.est_pose else target_extrinsics_est,
                 batch["target"]["intrinsics"],
                 batch["target"]["near"],
                 batch["target"]["far"],
@@ -339,9 +349,14 @@ class ModelWrapper(LightningModule):
             self.global_step,
             deterministic=False,
         )
+
+        if self.est_pose == '8-point':
+            target_extrinsics_est = pose_estimation_multi_view(batch, self.encoder.matcher, self.use_scale)
+
         output_softmax = self.decoder.forward(
             gaussians_softmax,
-            batch["target"]["extrinsics"],
+            # batch["target"]["extrinsics"],
+            batch["target"]["extrinsics"] if not self.est_pose else target_extrinsics_est,
             batch["target"]["intrinsics"],
             batch["target"]["near"],
             batch["target"]["far"],
@@ -399,6 +414,7 @@ class ModelWrapper(LightningModule):
 
         # Render colored depth map
         # Color-map the result.
+        """ 
         def depth_map(result): 
 
             near = result[result > 0][:16_000_000].quantile(0.01).log()
@@ -415,6 +431,7 @@ class ModelWrapper(LightningModule):
             [prep_image(add_border(vis_depth))],
             step=self.global_step,
         )
+        """
 
         # Draw cameras.
         cameras = hcat(*render_cameras(batch, 256))

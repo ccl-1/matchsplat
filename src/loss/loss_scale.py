@@ -38,5 +38,8 @@ class LossScale(Loss[LossScaleCfg, LossScaleCfgWrapper]):
             pose_ref = extrinsics[:, 0].clone().detach()
             pose_tgt = extrinsics[:, 1].clone().detach()
             pose = pose_tgt.inverse() @ pose_ref  # torch.Size([1, 4, 4])
-        return self.cfg.weight * (torch.norm(batch['pred_scale']- pose[:, :3, 3], dim=-1).mean())
+
+        scale_gt = torch.norm(pose[:, :3, 3], dim=1) 
+        scale_est = torch.norm(batch['pred_scale'], dim=1)
+        return self.cfg.weight * (torch.norm(scale_gt-scale_est, dim=-1).mean())
     

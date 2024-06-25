@@ -225,7 +225,7 @@ def estimate_depth_from_mkpt(features, intrinsics, extrinsics, batch, th_min=1.0
             pts_3d.append(pt3d)
         pts_3d_world = torch.stack(pts_3d)
         pts_3d_world = convert_to_ray_depth(features, origins, pts_3d_world, mkpts0 )
-        pc_mkpt_world_list.append(pts_3d_world)
+        pc_mkpt_world_list.append([pts_3d_world, mkpts0, mkpts1, mconf])
         
         # Transform from world to the coordinate 0 and 1
         pts_3d_0 = pc_transform(pts_3d_world, extr0.inverse())
@@ -314,7 +314,7 @@ def fusion_mkpt_costvolum(b, depth_mkpt, fullres_disps, alpha=None):
                 weight_depth = alpha * mk_z[vi] + (1 - alpha) * cost_depth
                 fullres_disps[i, vi].index_put_(index, weight_depth)
     fullres_disps = rearrange(fullres_disps, "b v ... -> (v b) 1 ...", b=b, v=v) 
-    return fullres_disps    
+    return fullres_disps
 
 
 def conv1x1(in_planes, out_planes, stride=1):
@@ -681,7 +681,7 @@ class DepthPredictorMultiView(nn.Module):
         )# (vb, 1, 256, 256)
 
         # fullres_disps = fusion_mkpt_costvolum(b, depth_mkpt, fullres_disps)
-        fullres_disps = fusion_mkpt_costvolum(b, depth_mkpt, fullres_disps, alpha=0.5)
+        # fullres_disps = fusion_mkpt_costvolum(b, depth_mkpt, fullres_disps, alpha=0.5)
 
         # depth refinement
         # proj_feat_in_fullres = self.upsampler(torch.cat((feat01, cnn_features), dim=1)) # (vb, 128, 256, 256)
@@ -745,41 +745,62 @@ class DepthPredictorMultiView(nn.Module):
                 srf=1,
             ) # (b, v, 65536, 1, 1)
 
-        if False:
-            # in world coordiante
-            def iproj_depth(depth, intr, extr):
-                pc = iproj_full_img_(depth, intr.unsqueeze(0), extr.unsqueeze(0)).squeeze(0)
-                perm = torch.randperm(pc.size(0))
-                idx = perm[:1000]
-                pc = pc[idx]
-                return pc
+        def iproj_mk_depth(depth, intr, extr, mkpts, kernel_size):
+            h, w = depth.size()
+            half_k = kernel_size // 2
+            x0_1 = torch.clamp(mkpts[:, 0] - half_k, min=0) 
+            x0_2 = torch.clamp(mkpts[:, 0] + half_k+1, max=w)
+            y0_1 = torch.clamp(mkpts[:, 1] - half_k, min=0)
+            y0_2 = torch.clamp(mkpts[:, 1] + half_k+1, max=h)  
 
-            h, w = batch["context"]["image"].shape[-2:]
-            for i in range(depths.shape[0]):
-                mkpt_pc = pc_mkpt_world_list[i]
-                
-                depth_pc0 = iproj_depth(
-                    rearrange(depths[i][0].squeeze(), "(h w) -> h w", h=h, w=w),
-                    batch["context"]["intrinsics"][i][0],
-                    batch["context"]["extrinsics"][i][0])
-                
-                
-                depth_pc1 = iproj_depth(
-                    rearrange(depths[i][1].squeeze(), "(h w) -> h w", h=h, w=w),
-                    batch["context"]["intrinsics"][i][1],
-                    batch["context"]["extrinsics"][i][1])
-                
-                colors = torch.zeros((mkpt_pc.shape[0] + depth_pc0.shape[0], 3))
-                colors[:mkpt_pc.shape[0], 0] = 255 
-                colors[mkpt_pc.shape[0]:, 1] = 255
+            pc = iproj_full_img_(depth, intr.unsqueeze(0), extr.unsqueeze(0)).squeeze(0)
+            pc = rearrange(pc, "(h w) c -> h w c", h=h, w=w) # h w 3
+            
+            d8_cost = []
+            for ni in range(len(x0_1)):
+                # print(x0_1[ni].long(), x0_2[ni].long())
+                mk_8 = pc[x0_1[ni].long(): x0_2[ni].long(), 
+                            y0_1[ni].long(): y0_2[ni].long(), :]
+                z_avg = mk_8[:, :, 2].mean()
+                xyz = torch.stack([mk_8[1, 1, 0], mk_8[1, 1, 1], z_avg])
+                d8_cost.append(xyz)
+            d8_cost = torch.stack(d8_cost) # [n, 3]
+            return d8_cost
 
-                colors2 = torch.zeros((depth_pc0.shape[0] + depth_pc1.shape[0], 3))
-                colors2[:depth_pc0.shape[0], 0] = 255
-                colors2[depth_pc0.shape[0]:, 1] = 255
+        depth_mk_pc0s, depth_mk_pc1s, mkpt_pcs, mconfs = [], [], [], []
+        h, w = batch["context"]["image"].shape[-2:]
+        for i in range(depths.shape[0]):
+            mkpt_pc,  mkpts0, mkpts1, mconf = pc_mkpt_world_list[i] # [n, 2]
+            depth_mk_pc0 = iproj_mk_depth(
+                rearrange(depths[i][0].squeeze(), "(h w) -> h w", h=h, w=w),
+                batch["context"]["intrinsics"][i][0],
+                batch["context"]["extrinsics"][i][0],
+                mkpts0, kernel_size=3)
+            
+            depth_mk_pc1 = iproj_mk_depth(
+                rearrange(depths[i][1].squeeze(), "(h w) -> h w", h=h, w=w),
+                batch["context"]["intrinsics"][i][1],
+                batch["context"]["extrinsics"][i][1],
+                mkpts1, kernel_size=3)
+            
+            depth_mk_pc0s.append(depth_mk_pc0)
+            depth_mk_pc1s.append(depth_mk_pc1)
+            mkpt_pcs.append(mkpt_pc)
+            mconfs.append(mconf)
 
-                save_color_points_ply(torch.cat([depth_pc0, depth_pc1], dim=0), colors2, f"outputs/tmp/depths{i}.ply")
-                save_color_points_ply(torch.cat([mkpt_pc, depth_pc0], dim=0), colors, f"outputs/tmp/depth_tri0_b{i}.ply")
-                save_color_points_ply(torch.cat([mkpt_pc, depth_pc1], dim=0), colors, f"outputs/tmp/depth_tri1_b{i}.ply")
-                input()
+        batch['depth_cost_triangulation'] = [depth_mk_pc0s, depth_mk_pc1s, mkpt_pcs, mconfs]
+
+            # colors = torch.zeros((mkpt_pc.shape[0] + depth_mk_pc0.shape[0], 3))
+            # colors[:mkpt_pc.shape[0], 0] = 255 
+            # colors[mkpt_pc.shape[0]:, 1] = 255
+
+            # colors2 = torch.zeros((depth_mk_pc0.shape[0] + depth_mk_pc1.shape[0], 3))
+            # colors2[:depth_mk_pc0.shape[0], 0] = 255
+            # colors2[depth_mk_pc0.shape[0]:, 1] = 255
+
+            # save_color_points_ply(torch.cat([depth_mk_pc0, depth_mk_pc1], dim=0), colors2, f"outputs/tmp/depths{i}.ply")
+            # save_color_points_ply(torch.cat([mkpt_pc, depth_mk_pc1], dim=0), colors, f"outputs/tmp/depth_tri0_b{i}.ply")
+            # save_color_points_ply(torch.cat([mkpt_pc, depth_mk_pc1], dim=0), colors, f"outputs/tmp/depth_tri1_b{i}.ply")
+            # input()
 
         return depths, densities, raw_gaussians

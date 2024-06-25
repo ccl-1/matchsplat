@@ -124,12 +124,6 @@ def train(cfg_dict: DictConfig):
     torch.manual_seed(cfg_dict.seed + trainer.global_rank)
 
     encoder, encoder_visualizer = get_encoder(cfg.model.encoder,  backbone_cfg =_default_cfg)
-    # if cfg.mode == "train":
-    #     depth_ckpt_path = "checkpoints/depth_predictor.ckpt"
-    #     # depth_ckpt_path = "outputs/tmp/checkpoints/epoch_131-step_5000.ckpt"
-    #     encoder.load_state_dict(torch.load(depth_ckpt_path), strict=False) # only load weight of depth_predictor
-    # else:
-    
     model_wrapper = ModelWrapper(
         cfg.optimizer,
         cfg.test,
@@ -146,20 +140,16 @@ def train(cfg_dict: DictConfig):
         step_tracker,
         global_rank=trainer.global_rank,
     )
+    depth_ckpt_path = "checkpoints/re10k.ckpt"
+    encoder.load_state_dict(torch.load(depth_ckpt_path), strict=False) # only load weight of depth_predictor
 
-    # depth_ckpt_path = "checkpoints/re10k.ckpt"
-    # encoder.load_state_dict(torch.load(depth_ckpt_path), strict=False) # only load weight of depth_predictor
-
-    # encoder_ckpt_path = "checkpoints/zoe_refined_small.ckpt"
-    encoder_ckpt_path = "checkpoints/epoch_256-step_10k.ckpt"
-    model_wrapper.load_state_dict(torch.load(encoder_ckpt_path)['state_dict'], strict=False)
+    # encoder_ckpt_path = "checkpoints/d4_4k.ckpt"
+    # encoder_ckpt_path = "outputs/fpn/checkpoints/s_mlp_gts.ckpt"
+    # model_wrapper.load_state_dict(torch.load(encoder_ckpt_path)['state_dict'], strict=False)
     
     if cfg.mode == "train":
         trainer.fit(model_wrapper, datamodule=data_module, ckpt_path=checkpoint_path)
     else:
-        # encoder_ckpt_path = "outputs/elfotr/checkpoints/epoch_999-step_10000-v1.ckpt"
-        # model_wrapper.load_state_dict(torch.load(encoder_ckpt_path)['state_dict'], strict=False)
-        
         trainer.test(
             model_wrapper,
             datamodule=data_module,
@@ -188,3 +178,4 @@ if __name__ == "__main__":
     print(_default_cfg)
     
     train()
+    # git push matchsplat main_1

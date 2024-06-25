@@ -99,8 +99,8 @@ def find_fundamental(points1: torch.Tensor, points2: torch.Tensor, weights: torc
     # apply the weights to the linear system
     w_diag = torch.diag_embed(weights)
     X = w_diag @ X
-
     # compute eigevectors and retrieve the one with the smallest eigenvalue
+    X = torch.nan_to_num(X, nan=1e-06)  
     _, _, V = torch.svd(X)
     F_mat = V[..., -1].view(-1, 3, 3)
 
@@ -172,11 +172,13 @@ def estimate_relative_pose_w8pt(kpts0, kpts1, intr0, intr1, confidence, choose_c
 #     else:
 #         return None, None
 
-def run_weighted_8_point(batch):
+def run_weighted_8_point(batch, use_scale=None):
     b, v, c, h, w = batch['context']['image'].shape
     # Only support 2 views and single surface single gaussians for now
     assert v == 2
     mbids = batch["mbids"]
+    if use_scale == 'mlp':
+        scale_mlp = batch['pred_scale']
     
     # Estimate the relative pose from 0 to 1
     # Only update the extrinsics of the second camera, the extr of the first camera remain
@@ -214,8 +216,15 @@ def run_weighted_8_point(batch):
             intr0[None], intr1[None], 
             mconf[None], 
             choose_closest=False, T_021=T_021_gt[None])
+      
+        # Give an initial value to prevent training interruption. . .
+        if T_021_est == None: 
+            T_021_est = torch.eye(4, 4).unsqueeze(0).to(scale.device)
         T_021_est = T_021_est.squeeze()
-        T_021_est[:3, 3] *= scale
+        if use_scale == 'gt':
+            T_021_est[:3, 3] *= scale
+        if use_scale == 'mlp':
+            T_021_est[:3, 3] *= torch.norm(scale_mlp[i])
 
         # update the estimated cam-to-world of the second cam
         # extr1_est = T_021_est @ extr0
@@ -227,7 +236,6 @@ def run_weighted_8_point(batch):
         trans_err_rel_list.append(compute_translation_error_as_angle(T_021_est[None], T_021_gt[None], reduce=False))
         rot_err_rel_list.append(compute_rotation_error(T_021_est[None], T_021_gt[None], reduce=False))
         
-
         # eval
         # print (f"gt extr1:\n {extr1}")
         # print (f"est extr1:\n {extr1_est}")
@@ -238,7 +246,6 @@ def run_weighted_8_point(batch):
         # print (f"est rel:\n {T_021_est}")
         # print (f"rotation err:\n {compute_rotation_error(T_021_est[None], T_021_gt[None], reduce=False)}") 
         # print (f"translation error:\n {compute_translation_error_as_angle(T_021_est[None], T_021_gt[None], reduce=False)}")
-
     pose_eval_dict = {
         "rot_err_abs" : torch.stack(rot_err_abs_list).mean(),
         "trans_err_abs" : torch.stack(trans_err_abs_list).mean(),
@@ -270,16 +277,18 @@ def estimate_relative_pose_cv2(kpts0, kpts1, intr0, intr1):
     return R, t, pts_3d
    
 
-def pose_estimation_multi_view(batch, matcher: LoFTR):
+def pose_estimation_multi_view(batch, matcher: LoFTR, use_scale=None):
     b, v, c, h, w = batch["target"]["image"].shape
     context_images = batch["context"]["image"][:, :1] # b, 1, c, h, w
     context_images = context_images.repeat(1, v, 1, 1, 1) # b, v, c, h, w
 
     target_images = batch["target"]["image"] 
-
     extrinsics_est = batch["target"]["extrinsics"].clone().detach()
 
     to_gray = tf.Grayscale()
+
+    if use_scale == 'mlp':
+        scale_mlp = batch['pred_scale']
 
     for i in range(b):
         # Run lofter matching
@@ -318,8 +327,13 @@ def pose_estimation_multi_view(batch, matcher: LoFTR):
                 intr0[None], intr1[None], 
                 mconf[None], 
                 choose_closest=False, T_021=T_021_gt[None])
+            if T_021_est == None: 
+                T_021_est = torch.eye(4, 4).unsqueeze(0).to(scale.device)
             T_021_est = T_021_est.squeeze()
-            T_021_est[:3, 3] *= scale
+            if use_scale == 'gt':
+                T_021_est[:3, 3] *= scale
+            if use_scale == 'mlp':
+                T_021_est[:3, 3] *= torch.norm(scale_mlp[i])
 
             # update the estimated cam-to-world of the second cam
             # extr1_est = T_021_est @ extr0
@@ -327,17 +341,15 @@ def pose_estimation_multi_view(batch, matcher: LoFTR):
             extrinsics_est[i, j] = extr1_est.squeeze()
 
             # eval
-            print (f"gt extr1:\n {extr1}")
-            print (f"est extr1:\n {extr1_est}")
-            print (f"rotation err:\n {compute_rotation_error(extr1_est[None], extr1[None], reduce=False)}") 
-            print (f"translation error:\n {compute_translation_error_as_angle(extr1_est[None], extr1[None], reduce=False)}")
-            print ()
-            print (f"gt rel:\n {T_021_gt}")
-            print (f"est rel:\n {T_021_est}")
-            print (f"rotation err:\n {compute_rotation_error(T_021_est[None], T_021_gt[None], reduce=False)}") 
-            print (f"translation error:\n {compute_translation_error_as_angle(T_021_est[None], T_021_gt[None], reduce=False)}")
-
-
+            # print (f"gt extr1:\n {extr1}")
+            # print (f"est extr1:\n {extr1_est}")
+            # print (f"rotation err:\n {compute_rotation_error(extr1_est[None], extr1[None], reduce=False)}") 
+            # print (f"translation error:\n {compute_translation_error_as_angle(extr1_est[None], extr1[None], reduce=False)}")
+            # print ()
+            # print (f"gt rel:\n {T_021_gt}")
+            # print (f"est rel:\n {T_021_est}")
+            # print (f"rotation err:\n {compute_rotation_error(T_021_est[None], T_021_gt[None], reduce=False)}") 
+            # print (f"translation error:\n {compute_translation_error_as_angle(T_021_est[None], T_021_gt[None], reduce=False)}")
     return extrinsics_est
 
 

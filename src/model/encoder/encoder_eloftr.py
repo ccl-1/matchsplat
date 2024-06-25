@@ -27,7 +27,9 @@ from .epipolar.epipolar_sampler import EpipolarSampler
 from ..encodings.positional_encoding import PositionalEncoding
 
 from .common.gaussian_adapter import GaussianAdapter, GaussianAdapterCfg
-from .costvolume.get_depth_fpn import DepthPredictorMultiView
+# from .costvolume.get_depth_fpn import DepthPredictorMultiView
+from .costvolume.get_depth import DepthPredictorMultiView
+
 
 from .visualization.encoder_visualizer_eloftr_cfg import EncoderVisualizerELoftrCfg
 
@@ -75,6 +77,7 @@ def MLP(channels: list, do_bn=True, do_leaky=False, last_layer=True):
                 layers.append(nn.ReLU())
     return nn.Sequential(*layers)
 
+
 class ConfidenceMLP(nn.Module):
     def __init__(self, feature_dim, in_dim, out_dim=1):
         super().__init__()
@@ -98,6 +101,81 @@ class ConfidenceMLP(nn.Module):
         # out_f = self.layers_f(inputs)
         # out_c = self.layers_c(desc[-1])
         # return torch.sigmoid(self.layers(out_f + out_c))
+
+
+class PosePrediction(nn.Module):
+    def __init__(self):
+        super(PosePrediction, self).__init__()
+        
+        self.pose_cnn = nn.Sequential(
+            nn.Conv2d(128, 128, 3, 1, 1),
+            nn.ReLU(),
+            nn.Conv2d(128, 32, 3, 1, 1),
+            nn.ReLU(),
+        )
+        
+        self.pose_regressor = nn.Sequential(
+            nn.Linear(32*64*64, 512 ),
+            nn.ReLU(),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128 * 2),
+            nn.ReLU(),
+        )
+        self.rotation_regressor = nn.Sequential(
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, 6),
+        )
+        self.translation_regressor = nn.Sequential(
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, 3),
+        )
+
+    
+    def r6d2mat(self,d6: torch.Tensor) -> torch.Tensor:
+        """
+        Converts 6D rotation representation by Zhou et al. [1] to rotation matrix
+        using Gram--Schmidt orthogonalisation per Section B of [1].
+        Args:
+            d6: 6D rotation representation, of size (*, 6). Here corresponds to the two
+                first two rows of the rotation matrix. 
+        Returns:
+            batch of rotation matrices of size (*, 3, 3)
+        [1] Zhou, Y., Barnes, C., Lu, J., Yang, J., & Li, H.
+        On the Continuity of Rotation Representations in Neural Networks.
+        IEEE Conference on Computer Vision and Pattern Recognition, 2019.
+        Retrieved from http://arxiv.org/abs/1812.07035
+        """
+
+        a1, a2 = d6[..., :3], d6[..., 3:]
+        b1 = F.normalize(a1, dim=-1)
+        b2 = a2 - (b1 * a2).sum(-1, keepdim=True) * b1
+        b2 = F.normalize(b2, dim=-1)
+        b3 = torch.cross(b1, b2, dim=-1)
+        return torch.stack((b1, b2, b3), dim=-2)  # corresponds to row
+    
+    def forward(self, x):
+        b, v, c, h, w = x.size()
+        x = rearrange(x, "b v c h w -> (b v) c h w", b=b, v=v)
+        x = self.pose_cnn(x)
+        x = rearrange(x, "(b v) c h w -> (b v) (c h w)", b=b, v=v)
+        pose_latent_ctxt = self.pose_regressor(x)[:,:128]
+        rot_ctxt, tran_ctxt = self.rotation_regressor(pose_latent_ctxt), self.translation_regressor(pose_latent_ctxt) # B x n_views x 9, B x n_views x 3 
+        R_ctxt = self.r6d2mat(rot_ctxt)[:, :3, :3] 
+        pose_mlp = torch.cat((torch.cat((R_ctxt, tran_ctxt.unsqueeze(-1)), dim=-1), 
+                torch.FloatTensor([0,0,0,1]).expand(b*v, 1,-1).to(tran_ctxt.device)), dim=1)
+        pose_mlp = rearrange(pose_mlp, "(b v) h w -> b v h w", b=b, v=v)
+        return pose_mlp
+
+        
 
 @dataclass
 class EncoderELoFTRCfg:
@@ -125,8 +203,10 @@ class EncoderELoFTRCfg:
     wo_cost_volume: bool
     wo_backbone_cross_attn: bool
     wo_cost_volume_refine: bool
+    est_pose: str | None
+    use_scale: str | None
+    use_fpn:bool
 
-    wo_fpn_depth: bool
 
 
 class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
@@ -138,13 +218,13 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         super().__init__(cfg)
         self.config = backbone_cfg
         self.return_cnn_features = True
-        self.use_zoe_loss = False
+        # self.use_zoe_loss = False
 
-        if self.use_zoe_loss:
-            print("==> Load ZoeDepth model ")
-            repo = "isl-org/ZoeDepth"
-            self.zoe = torch.hub.load(repo, "ZoeD_N", pretrained=True).cuda()
-
+        # if self.use_zoe_loss:
+        #     print("==> Load ZoeDepth model ")
+        #     repo = "isl-org/ZoeDepth"
+        #     self.zoe = torch.hub.load(repo, "ZoeD_N", pretrained=True).cuda()
+        self.get_pose = PosePrediction()
         self.matcher = LoFTR(backbone_cfg)
         ckpt_path = cfg.eloftr_weights_path
         if cfg.eloftr_weights_path is None:
@@ -164,33 +244,28 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         self.conv_3x3_2 = nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1)
         self.conv_3x3_3 = nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1)
 
-        self.translation_regressor = nn.Sequential(
-            nn.Linear(128*64*64 * 2, 128 ),
+        self.scale_conv = nn.Sequential(nn.Conv2d(128, 32, kernel_size=1, stride=1), nn.ReLU())
+        self.scale_regressor = nn.Sequential( # input(B, N)
+            nn.Linear(32*64*64*2, 128),
             nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, 32),
-            nn.ReLU(),
-            nn.Linear(32, 3),
+            nn.Linear(128, 3),
         )
 
         # confidence prediction for pose estimation
-        self.use_conf_mlp = True
-        if self.use_conf_mlp:
+        if self.cfg.est_pose == 'w8-point':
             conf_feat_dim = 256
             conf_dim = 1
             self.conf_mlp = ConfidenceMLP(conf_feat_dim, conf_dim)
-
 
         # gaussians convertor
         self.gaussian_adapter = GaussianAdapter(cfg.gaussian_adapter)
 
         # TODO BA based depth predictor
         self.depth_predictor = DepthPredictorMultiView(
-            feature_channels=[256, 128, 64], #df
-            upscale_factor=[8, 4, 2], #ds
+            feature_channels=[256, 128, 64] if cfg.use_fpn else cfg.d_feature, 
+            upscale_factor=[8, 4, 2] if cfg.use_fpn else cfg.downscale_factor , 
             num_depth_candidates=cfg.num_depth_candidates,
-            costvolume_unet_feat_dim=[256, 128, 64], #df
+            costvolume_unet_feat_dim=[256, 128, 64] if cfg.use_fpn else cfg.costvolume_unet_feat_dim, 
 
             costvolume_unet_channel_mult=tuple(cfg.costvolume_unet_channel_mult),
             costvolume_unet_attn_res=tuple(cfg.costvolume_unet_attn_res),
@@ -218,8 +293,10 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
 
     def get_scale(self, x):
         b, v, _, _, _ = x.shape
-        x = rearrange(x, "b v c h w -> b (v c h w)", b=b, v=v) 
-        scale = self.translation_regressor(x)
+        x = rearrange(x, "b v c h w -> (b v) c h w", b=b, v=v)
+        x = self.scale_conv(x)
+        x = rearrange(x, "(b v) c h w -> b (v c h w)", b=b, v=v)
+        scale = self.scale_regressor(x)
         return scale
 
     def get_fpn_trans_features(self, trans_features): 
@@ -243,15 +320,24 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
 
 
     def sample_descriptors(self, keypoints, descriptors, s: int = 8):
-        """Interpolate descriptors at keypoint locations"""
+        """Interpolate descriptors at keypoint locations
+            keypoints: [1, n, 2]
+            descriptors: [1, c, h, w]
+            return : [1, c, n]
+        """
         b, c, h, w = descriptors.shape
-        keypoints = keypoints - s / 2 + 0.5
+        # print(keypoints[0,0])
+        keypoints = keypoints - s / 2.0 + 0.5
         keypoints /= torch.tensor(
-            [(w * s - s / 2 - 0.5), (h * s - s / 2 - 0.5)],
+            [(w * s - s / 2. - 0.5), (h * s - s / 2. - 0.5)],
         ).to(
             keypoints
         )[None]
-        keypoints = keypoints * 2 - 1  # normalize to (-1, 1)
+        # print(keypoints[0,0] * 256)
+        # input()
+
+        # keypoints /= 256
+        keypoints = keypoints * 2. - 1.  # normalize to (-1, 1)
         args = {"align_corners": True} if torch.__version__ >= "1.3" else {}
         descriptors = torch.nn.functional.grid_sample(
             descriptors, keypoints.view(b, 1, -1, 2), mode="bilinear", **args
@@ -261,23 +347,6 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         )
         return descriptors
 
-    def adaptive_layers(self, trans_features, cnn_features):
-        b, v, _, _, _ = trans_features.shape
-        trans_features = rearrange(trans_features, "b v c h w -> (b v) c h w", b=b, v=v)
-        cnn_features = rearrange(cnn_features, "b v c h w -> (b v) c h w", b=b, v=v)
-
-        trans_features = F.interpolate(trans_features, scale_factor=2., mode='bilinear', align_corners=False)
-        trans_features = F.relu(self.deconv_1x1_trans_1(trans_features))
-        trans_features = F.relu(self.deconv_1x1_trans_2(trans_features))
-
-        cnn_features = F.interpolate(cnn_features, scale_factor=2., mode='bilinear', align_corners=False)
-        cnn_features = F.relu(self.deconv_1x1_cnn_1(cnn_features))
-        cnn_features = F.relu(self.deconv_1x1_cnn_2(cnn_features))
-
-        trans_features = rearrange(trans_features, "(b v) c h w -> b v c h w", b=b, v=v)
-        cnn_features = rearrange(cnn_features, "(b v) c h w -> b v c h w", b=b, v=v)
-
-        return trans_features, cnn_features
 
     def map_pdf_to_opacity(
             self,
@@ -307,7 +376,6 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
 
         print ("input image shape", data['image0'].shape)
         trans_features, cnn_features = self.matcher(data, self.return_cnn_features)
-
         mkpts0, mkpts1, mconf = data['mkpts0_f'], data['mkpts1_f'], data['mconf']
 
         print ("mkpts0.shape", mkpts0.shape)
@@ -324,40 +392,36 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         device = context["image"].device
         b, v, _, h, w = context["image"].shape      # 224, 320
         data = self.data_process(context["image"])  # input size must be divides by 32
-
-        # print ("input image shape", data['image0'].shape)
-
-        # TODO: maybe use the features after the fusion stage 
-        # for the later depth and gaussian parameter estimation
         
         """
             trans_feature: [b, v, 256, h/8, w/8]
             cnn_features: [b, v, 256, h/8, w/8], [b, v, 128, h/4, w/4], [b, v, 64, h/2, w/2]
         """
-        trans_features, cnn_features_list = self.matcher(data, self.return_cnn_features) 
-        # trans_features, cnn_features = self.adaptive_layers(trans_features, cnn_features)
+        trans_features, cnn_features_list = self.matcher(data, self.return_cnn_features)    
         trans_features_list = self.get_fpn_trans_features(trans_features)
 
-        pred_scales = self.get_scale(trans_features_list[1]) # b,3
+        if not self.cfg.use_fpn:
+            in_feats = trans_features_list[1]
+            cnn_feats = cnn_features_list[1]
+        else:
+            cnn_feats = cnn_features_list
+            in_feats = trans_features_list
+        
+        pred_scales = self.get_scale(trans_features_list[1]) # b,1
         batch['pred_scale'] = pred_scales
-
-
-        # mkpts: shape [N, 2] with mkpts0 in all batch concatenated together, if not, the number of matched keypoints
-        # in different batches will be different and difficult to store them. 
-        # We can recover the matched keypoints for the desired batch by 
-        # mkpts0_b0 = mkpts0[mbids == 0]
-        conf_mask = data['mconf'] >= 0.5
+   
+        # conf 训练动态变化，所以不能直接用来过滤， conf_mask 过滤会导致最终没有点用， depth 出现 nan ...  
         batch["mkpts0"], batch["mkpts1"], batch["mconf"], batch['mbids'] = \
-            data['mkpts0_f'][conf_mask], data['mkpts1_f'][conf_mask], data['mconf'][conf_mask], data['m_bids'][conf_mask]
-        # batch["mkpts0"], batch["mkpts1"], batch["mconf"], batch['mbids'] = \
-        #     data["mkpts0_f"], data["mkpts1_f"], data["mconf"], data['m_bids']
+            data["mkpts0_f"], data["mkpts1_f"], data["mconf"], data['m_bids']
 
-
-        # est_pose = False
-        est_pose = True
-        if est_pose:
+        if self.cfg.est_pose == 'mlp':
+            extrinsics_est = self.get_pose(trans_features_list[1])
+            batch['pose_mlp'] = extrinsics_est
+            
+        else:
             #  Weights decoder for weighted 8-point algorithm
-            if self.use_conf_mlp:
+            # only affects the training phase, maybe ... 
+            if self.cfg.est_pose == 'w8-point':
                 weights_list = []
                 for i in range(b):
                     b_mask = batch['mbids'] == i
@@ -366,9 +430,9 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
                     mconf = batch["mconf"][b_mask].view(1, 1, -1) # [1, 1, n]
 
                     # print ("mconf before:", batch["mconf"][b_mask])
-
                     feat0 = trans_features[i][0][None] # [1, 256, h/8, w/8]
                     feat1 = trans_features[i][1][None] # [1, 256, h/8, w/8]
+                    # print(feat0.shape)
 
                     # sample descriptors from trans features
                     desc0 = self.sample_descriptors(mkpts0, feat0) # [1, 256, n]
@@ -385,14 +449,14 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
                 batch["mconf"] = weights
 
             # Pose estimation from the sparse matched keypoints
-            extrinsics_est, pose_eval_dict = run_weighted_8_point(batch)
+            extrinsics_est, pose_eval_dict = run_weighted_8_point(batch, use_scale=self.cfg.use_scale)
             batch.update(pose_eval_dict)
 
-
+        # print('after:', batch["mconf"][0])
+        # batch['rel_pose'] =  rearrange(context["extrinsics"], "b v x y -> (b v) x y")
+        # batch['gt_rel_pose'] = rearrange(extrinsics_est, "b v x y -> (b v) x y")
+        
         # Sample depths from the resulting features.
-        # in_feats = trans_features #[2]
-        in_feats = trans_features_list
-
         extra_info = {}
         extra_info['images'] = rearrange(context["image"], "b v c h w -> (v b) c h w")
         extra_info["scene_names"] = scene_names
@@ -401,13 +465,13 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         depths, densities, raw_gaussians = self.depth_predictor(
             in_feats,
             context["intrinsics"],
-            context["extrinsics"] if not est_pose else extrinsics_est,
+            context["extrinsics"] if not self.cfg.est_pose  else extrinsics_est,  
             context["near"],
             context["far"],
             gaussians_per_pixel=gpp,
             deterministic=deterministic,
             extra_info=extra_info,
-            cnn_features=cnn_features_list,
+            cnn_features=cnn_feats,
             batch=batch,
         )
         """
@@ -417,25 +481,25 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         """
         batch["context"]["est_depth"] = rearrange(depths, "b v (h w) srf s -> b v h w srf s", h=h, w=w)
         
-        if self.use_zoe_loss:
-            zoe_depths = get_zoe_depth(self.zoe, context["image"], vis=False).to(densities.device) # b v 1 h w        
-            batch["context"]['zoe_depth'] =  rearrange(zoe_depths, "b v (h w) srf s -> b v h w srf s", h=h, w=w)
+        # if self.use_zoe_loss:
+        #     zoe_depths = get_zoe_depth(self.zoe, context["image"], vis=False).to(densities.device) # b v 1 h w        
+        #     batch["context"]['zoe_depth'] =  rearrange(zoe_depths, "b v (h w) srf s -> b v h w srf s", h=h, w=w)
 
         # save depth result to compare
-        vis_depth = False
-        if vis_depth:
-            near, far = 0.0, 100.0
-            depth_vis = batch["context"]["est_depth"].squeeze(-1).squeeze(-1).cpu().detach()
-            zoe_depth_vis = batch["context"]['zoe_depth'].squeeze(-1).squeeze(-1).cpu().detach()
-            for v_idx in range(depth_vis.shape[1]):
-                depth_vis = np.clip(depth_vis, near, far)
-                vis_depth = viz_depth_tensor(1.0 / depth_vis[0, v_idx], return_numpy=True)  # inverse depth
-                Image.fromarray(vis_depth).save(f"outputs/tmp/depth/pred_{v_idx}.png")
-                vis_depth = viz_depth_tensor(1.0 / zoe_depth_vis[0, v_idx], return_numpy=True)  # inverse depth
-                Image.fromarray(vis_depth).save(f"outputs/tmp/depth/zoe_{v_idx}.png")
-                print(depth_vis[0, v_idx])
-                print(zoe_depth_vis[0, v_idx]) 
-            input()
+        # vis_depth = False
+        # if vis_depth:
+        #     near, far = 0.0, 100.0
+        #     depth_vis = batch["context"]["est_depth"].squeeze(-1).squeeze(-1).cpu().detach()
+        #     zoe_depth_vis = batch["context"]['zoe_depth'].squeeze(-1).squeeze(-1).cpu().detach()
+        #     for v_idx in range(depth_vis.shape[1]):
+        #         depth_vis = np.clip(depth_vis, near, far)
+        #         vis_depth = viz_depth_tensor(1.0 / depth_vis[0, v_idx], return_numpy=True)  # inverse depth
+        #         Image.fromarray(vis_depth).save(f"outputs/tmp/depth/pred_{v_idx}.png")
+        #         vis_depth = viz_depth_tensor(1.0 / zoe_depth_vis[0, v_idx], return_numpy=True)  # inverse depth
+        #         Image.fromarray(vis_depth).save(f"outputs/tmp/depth/zoe_{v_idx}.png")
+        #         print(depth_vis[0, v_idx])
+        #         print(zoe_depth_vis[0, v_idx]) 
+        #     input()
 
         # Convert the features and depths into Gaussians.
         xy_ray, _ = sample_image_grid((h, w), device)
